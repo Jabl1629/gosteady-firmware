@@ -1,0 +1,39 @@
+# Zephyr / west build artifacts
+build/
+build_*/
+.west/
+twister-out/
+twister-out.*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Compiled artifacts
+*.o
+*.a
+*.so
+*.hex
+*.bin
+*.elf
+*.map
+
+# Editor / IDE
+.vscode/*
+!.vscode/settings.json.example
+!.vscode/launch.json.example
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local config overrides
+prj_local.conf
+*.local.overlay
