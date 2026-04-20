@@ -17,8 +17,8 @@ The prototype development platform is the **Nordic Thingy:91 X** dev board, whic
 | **nRF9151** | Main application processor + LTE-M/NB-IoT cellular | — | Runs our firmware, has TF-M in secure partition |
 | **nRF5340** | BLE host + network core | — | BLE connectivity to phone app (future) |
 | **nRF7002** | Wi-Fi 6 companion | — | Not used in v1 |
-| **BMI270** | 6-axis IMU (accel + gyro) | SPI | **Primary sensor** — step detection + stride estimation |
-| **ADXL367** | Ultra-low-power 3-axis accelerometer | SPI | Secondary/backup accel, wake-on-motion trigger |
+| **BMI270** | 6-axis IMU (accel + gyro) | SPI (`spi3` @ CS `P0.10`, 10 MHz max, IRQ `P0.06` active-low) | **Primary sensor** — step detection + stride estimation |
+| **ADXL367** | Ultra-low-power 3-axis accelerometer | I²C (`i2c2` @ `0x1d`, INT1 `P0.11` active-high) | Secondary/backup accel, wake-on-motion trigger |
 | **64 MB QSPI Flash** | External storage | QSPI | IMU data logging for offline analysis |
 
 ### Board Target
@@ -97,7 +97,7 @@ west flash
 Things that have already bitten us at least once. Read before the next hardware bring-up.
 
 - **VS Code build config board must be `thingy91x/nrf9151/ns`.** Easy to accidentally create a build config pointing at `nrf9151dk` — it will build cleanly but produce an image with completely different pin assignments. Symptom: LEDs do the wrong thing, UART is garbage, peripherals don't respond. Sanity check: `build/gosteady-firmware/zephyr/.config` should contain `CONFIG_BOARD="thingy91x"`.
-- **`west flash` with the nrfutil runner only erases sectors the new image touches.** If the chip has leftover UICR from an incompatible previous image, flashing fails with `UICR data is not erasable`. Fix: `nrfjprog -f NRF91 --eraseall` once, then flash.
+- **`west flash` with the nrfutil runner hits `UICR data is not erasable` on nearly every flash.** The runner only erases sectors the new image touches, and our b0 + MCUboot + TF-M + app layout writes UICR on every rebuild. Fix: `nrfutil device erase --serial-number 802006700` before each `west flash`, or use the nrfjprog runner with `--eraseall` (slower but single-command).
 - **APPROTECT + ERASEPROTECT lockout.** If a flashed image turned on readback protection, `nrfjprog --recover` alone fails. On the nRF9151 (single core), chain recover + program in one invocation so no reset re-asserts the lock between them: `nrfjprog -f NRF91 --recover --program build/merged.hex --verify --reset`. (On multi-core nRF5340 targets, recover the network core first with `--coprocessor CP_NETWORK --recover` to clear the interlock.)
 - **Board stops enumerating on USB-C → bridge firmware is probably corrupt.** Reflash the connectivity bridge from the local Nordic bundle: `nordic resources/thingy91x_mfw-2.0.4_sdk-3.2.1/img_app_bl/thingy91x_nrf53_connectivity_bridge_v3.0.1.hex`, with **SW2 flipped to nRF53**. This recovery is independent of anything wrong on the nRF9151 side.
 - **`cat /dev/cu.usbmodem*` shows a dead console even when the app is logging.** The bridge holds UART RX back until DTR is asserted; plain `cat` doesn't. Use `screen`, `minicom`, `cu`, pyserial, or nRF Terminal — all assert DTR on open. See the pyserial one-liner in the *Build & Flash Commands* section.
@@ -126,7 +126,10 @@ Things that have already bitten us at least once. Read before the next hardware 
 
 ### Current State
 
-The repo contains a **blinky scaffold** — a minimal Zephyr app that toggles an LED and logs heartbeat ticks. As of **2026-04-19**, **Milestone 1 (dev environment setup) is fully complete**: the toolchain, SDK, J-Link path, end-to-end build + flash cycle, and serial console are all proven against real hardware. The RGB LED blinks purple at 1 Hz and `<inf> gosteady: heartbeat tick=N` prints at 1 Hz on `/dev/cu.usbmodem102`.
+The repo contains a **bring-up target** — a minimal Zephyr app that blinks the RGB LED purple at 1 Hz, prints a heartbeat log, and polls both motion sensors once per tick. As of **2026-04-19**, **Milestones 1 and 2 are complete**: toolchain, SDK, J-Link path, build+flash cycle, serial console, and both sensor drivers are all verified against real hardware.
+
+- **M1 (dev env):** `<inf> gosteady: heartbeat tick=N` prints at 1 Hz on `/dev/cu.usbmodem102`.
+- **M2 (sensor bring-up):** BMI270 (SPI) and ADXL367 (I²C) both produce sane readings — ~±1 g on the gravity axis at rest, noise-floor-level signal on the other axes. BMI270 is configured at 4 g / 500 dps / 100 Hz per the v1 annotation schema. **Note:** Z-axis signs are opposite between BMI270 (+1 g) and ADXL367 (-1 g) because the two chips are mounted in different orientations on the PCB — handle this at the algorithm fusion layer.
 
 The repo is pushed to GitHub at `https://github.com/Jabl1629/gosteady-firmware` — though as of this update, local has substantial uncommitted work beyond the initial scaffold commit.
 
@@ -392,7 +395,7 @@ timestamp_ms  accel_x_g  accel_y_g  accel_z_g  gyro_x_dps  gyro_y_dps  gyro_z_dp
 
 ## Immediate Next Steps
 
-Milestone 1 is **fully done** — blink confirmed, heartbeat log confirmed on the serial console. Next is **Milestone 2 — sensor bring-up** (BMI270 + ADXL367). First task there: verify the actual bus wiring from the Thingy:91 X DTS (or the `PCA20065_Schematic_And_PCB.pdf` in `nordic resources/`) before writing any sensor code, so we don't end up with the wrong peripheral on the wrong bus. 
+Milestones 1 and 2 are both done. Next is **Milestone 3 — external flash**: bring up LittleFS on the 64 MB QSPI (Gigadevice GD25LE255E, already `status = "okay"` on `spi3` CS0 in the board DTS — we just need the Kconfig + mount point). That unlocks Milestone 4 (binary session logging with versioned header), which is where the firmware-owned fields from the v1 annotation schema (see *Data Collection Plan*) start getting stamped into real session files. 
 
 ---
 

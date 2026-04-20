@@ -1,0 +1,20 @@
+/*
+ * GoSteady board overlay for thingy91x/nrf9151/ns.
+ *
+ * Milestone 2 brings up the two motion sensors. Both sensor nodes are
+ * defined but marked `disabled` in the upstream Thingy:91 X board DTS,
+ * so we just flip their status to `okay` here. Bus wiring, register
+ * addresses, max SPI frequency, and IRQ GPIOs all come from the board
+ * DTS — no changes needed.
+ *
+ * - accelerometer_hp  = BMI270 (6-axis, SPI on spi3 CS2 = P0.10, IRQ P0.06)
+ * - accel             = ADXL367 (3-axis LP, I2C on i2c2 @ 0x1d, INT1 P0.11)
+ */
+
+&accelerometer_hp {
+	status = "okay";
+};
+
+&accel {
+	status = "okay";
+};
