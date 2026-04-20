@@ -18,7 +18,10 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/fs/fs.h>
+#include <zephyr/fs/littlefs.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/storage/flash_map.h>
 
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
@@ -66,6 +69,20 @@ static const struct device *const bmi270  = DEVICE_DT_GET(BMI270_NODE);
 static const struct device *const adxl367 = DEVICE_DT_GET(ADXL367_NODE);
 
 /*
+ * LittleFS on the GD25LE255E external flash. The `littlefs_storage`
+ * partition is created by the NCS partition manager when
+ * CONFIG_FILE_SYSTEM_LITTLEFS + CONFIG_PM_PARTITION_REGION_LITTLEFS_EXTERNAL
+ * are set — no fixed-partitions overlay needed.
+ */
+FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(lfs_data);
+static struct fs_mount_t lfs_mnt = {
+	.type = FS_LITTLEFS,
+	.fs_data = &lfs_data,
+	.storage_dev = (void *)FIXED_PARTITION_ID(littlefs_storage),
+	.mnt_point = "/lfs",
+};
+
+/*
  * Bring the BMI270 out of its power-on suspend state. The driver uploads
  * the sensor config file during init, but accel and gyro stay powered off
  * until we set SAMPLING_FREQUENCY to a non-zero rate (this is what picks
@@ -73,6 +90,64 @@ static const struct device *const adxl367 = DEVICE_DT_GET(ADXL367_NODE);
  * annotation schema: 4G / 500 dps / 100 Hz, normal oversampling. The
  * Python-side .dat files ran at ~99.3 Hz, which is this exact config.
  */
+/*
+ * Mount LittleFS and bump a persistent boot counter. The counter surviving a
+ * reset is our proof that the external flash path is end-to-end working.
+ */
+static int mount_lfs_and_bump_boot_count(void)
+{
+	struct fs_statvfs vfs;
+	struct fs_file_t f;
+	uint32_t count = 0;
+	ssize_t n;
+	int ret;
+
+	ret = fs_mount(&lfs_mnt);
+	if (ret < 0) {
+		LOG_ERR("fs_mount(/lfs) failed (%d)", ret);
+		return ret;
+	}
+
+	ret = fs_statvfs("/lfs", &vfs);
+	if (ret == 0) {
+		LOG_INF("lfs mounted: block=%lu total=%lu bytes free=%lu bytes",
+			(unsigned long)vfs.f_bsize,
+			(unsigned long)(vfs.f_blocks * vfs.f_frsize),
+			(unsigned long)(vfs.f_bfree  * vfs.f_frsize));
+	}
+
+	fs_file_t_init(&f);
+	ret = fs_open(&f, "/lfs/boot_count", FS_O_CREATE | FS_O_RDWR);
+	if (ret < 0) {
+		LOG_ERR("fs_open(/lfs/boot_count) failed (%d)", ret);
+		return ret;
+	}
+
+	n = fs_read(&f, &count, sizeof(count));
+	if (n < 0) {
+		LOG_WRN("fs_read boot_count failed (%d); starting from 0", (int)n);
+		count = 0;
+	} else if (n != sizeof(count)) {
+		/* First boot, freshly-created empty file. */
+		count = 0;
+	}
+
+	count++;
+
+	ret = fs_seek(&f, 0, FS_SEEK_SET);
+	if (ret < 0) {
+		LOG_WRN("fs_seek failed (%d)", ret);
+	}
+	ret = fs_write(&f, &count, sizeof(count));
+	if (ret < 0) {
+		LOG_ERR("fs_write boot_count failed (%d)", ret);
+	}
+
+	fs_close(&f);
+	LOG_INF("boot_count = %u (persisted to /lfs/boot_count)", count);
+	return 0;
+}
+
 static int configure_bmi270(void)
 {
 	struct sensor_value full_scale, sampling_freq, oversampling;
@@ -211,6 +286,13 @@ int main(void)
 	ret = configure_bmi270();
 	if (ret < 0) {
 		return ret;
+	}
+
+	ret = mount_lfs_and_bump_boot_count();
+	if (ret < 0) {
+		/* Log the failure but keep running so we still blink + poll sensors;
+		 * the external-flash path is a bring-up target, not load-bearing yet. */
+		LOG_WRN("LittleFS bring-up failed — continuing without persistent storage");
 	}
 
 	LOG_INF("Bring-up complete. Entering purple blink + sensor poll loop.");

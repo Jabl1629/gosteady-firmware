@@ -19,7 +19,7 @@ The prototype development platform is the **Nordic Thingy:91 X** dev board, whic
 | **nRF7002** | Wi-Fi 6 companion | — | Not used in v1 |
 | **BMI270** | 6-axis IMU (accel + gyro) | SPI (`spi3` @ CS `P0.10`, 10 MHz max, IRQ `P0.06` active-low) | **Primary sensor** — step detection + stride estimation |
 | **ADXL367** | Ultra-low-power 3-axis accelerometer | I²C (`i2c2` @ `0x1d`, INT1 `P0.11` active-high) | Secondary/backup accel, wake-on-motion trigger |
-| **64 MB QSPI Flash** | External storage | QSPI | IMU data logging for offline analysis |
+| **GD25LE255E SPI NOR Flash (32 MB)** | External storage | SPI (shared `spi3` bus, 8 MHz max) | IMU session logs, MCUboot secondary, modem FOTA staging |
 
 ### Board Target
 
@@ -126,10 +126,11 @@ Things that have already bitten us at least once. Read before the next hardware 
 
 ### Current State
 
-The repo contains a **bring-up target** — a minimal Zephyr app that blinks the RGB LED purple at 1 Hz, prints a heartbeat log, and polls both motion sensors once per tick. As of **2026-04-19**, **Milestones 1 and 2 are complete**: toolchain, SDK, J-Link path, build+flash cycle, serial console, and both sensor drivers are all verified against real hardware.
+The repo contains a **bring-up target** — a minimal Zephyr app that blinks the RGB LED purple at 1 Hz, prints a heartbeat log, polls both motion sensors once per tick, and persists a boot counter to external flash. As of **2026-04-19**, **Milestones 1–3 are complete**: toolchain, SDK, J-Link path, build+flash cycle, serial console, sensor drivers, and LittleFS on the external SPI NOR are all verified against real hardware.
 
 - **M1 (dev env):** `<inf> gosteady: heartbeat tick=N` prints at 1 Hz on `/dev/cu.usbmodem102`.
 - **M2 (sensor bring-up):** BMI270 (SPI) and ADXL367 (I²C) both produce sane readings — ~±1 g on the gravity axis at rest, noise-floor-level signal on the other axes. BMI270 is configured at 4 g / 500 dps / 100 Hz per the v1 annotation schema. **Note:** Z-axis signs are opposite between BMI270 (+1 g) and ADXL367 (-1 g) because the two chips are mounted in different orientations on the PCB — handle this at the algorithm fusion layer.
+- **M3 (external flash):** LittleFS mounted at `/lfs` on an 8 MB `littlefs_storage` partition carved out of `external_flash` by the NCS partition manager. Persistence verified — `/lfs/boot_count` increments across hardware resets. 4096-byte erase blocks, 512-cycle wear threshold. Partition range: `0x4d2000`–`0xcd2000` (8 MB); remainder of external flash (`0xcd2000`–`0x2000000`, ~19 MB) stays free for future use.
 
 The repo is pushed to GitHub at `https://github.com/Jabl1629/gosteady-firmware` — though as of this update, local has substantial uncommitted work beyond the initial scaffold commit.
 
@@ -178,7 +179,7 @@ CONFIG_MAIN_STACK_SIZE=4096
 
 1. **Dev environment setup** — blinky on the board. *(done 2026-04-19; serial console verification still pending)*
 2. **Sensor bring-up** — BMI270 / ADXL367 reads over SPI / I²C. *(← next)*
-3. **External flash** — LittleFS on the 64 MB QSPI.
+3. **External flash** — LittleFS on the 32 MB SPI NOR.
 4. **Session logging** — binary session files on flash with versioned header.
 5. **USB dump** — mass storage / CDC-ACM path for host-side extraction.
 6. **BLE control** — start/stop session commands over GATT (NUS).
@@ -395,7 +396,7 @@ timestamp_ms  accel_x_g  accel_y_g  accel_z_g  gyro_x_dps  gyro_y_dps  gyro_z_dp
 
 ## Immediate Next Steps
 
-Milestones 1 and 2 are both done. Next is **Milestone 3 — external flash**: bring up LittleFS on the 64 MB QSPI (Gigadevice GD25LE255E, already `status = "okay"` on `spi3` CS0 in the board DTS — we just need the Kconfig + mount point). That unlocks Milestone 4 (binary session logging with versioned header), which is where the firmware-owned fields from the v1 annotation schema (see *Data Collection Plan*) start getting stamped into real session files. 
+Milestones 1–3 are done. Next is **Milestone 4 — session logging**: define a versioned binary session file format that stamps the 13 FIRMWARE fields + 12 PRE-WALK fields from the v1 annotation schema (see *Data Collection Plan*) into the file header, then streams IMU samples at 100 Hz into the body. File rolls on each BLE `start_session` / `stop_session` pair (those commands land in Milestone 6); for M4 we can prove the path with a bench-triggered session. Target file name scheme: `/lfs/sessions/<session_uuid>.dat`. 
 
 ---
 
