@@ -126,11 +126,12 @@ Things that have already bitten us at least once. Read before the next hardware 
 
 ### Current State
 
-The repo contains a **bring-up target** — a minimal Zephyr app that blinks the RGB LED purple at 1 Hz, prints a heartbeat log, polls both motion sensors once per tick, and persists a boot counter to external flash. As of **2026-04-19**, **Milestones 1–3 are complete**: toolchain, SDK, J-Link path, build+flash cycle, serial console, sensor drivers, and LittleFS on the external SPI NOR are all verified against real hardware.
+The repo is at a **session-logging bring-up target**. On boot: mount LittleFS, bump the boot counter, start a 100 Hz BMI270 sampling thread, wire SW0 as a short-press toggle for session start/stop. LED state tells the operator which mode they're in (solid green while recording, purple blink while idle). As of **2026-04-20**, **Milestones 1–4 are complete**: toolchain, SDK, J-Link path, build+flash cycle, serial console, sensor drivers, LittleFS, and session-file writer + host-side ingest dry-run are all verified against real hardware.
 
 - **M1 (dev env):** `<inf> gosteady: heartbeat tick=N` prints at 1 Hz on `/dev/cu.usbmodem102`.
 - **M2 (sensor bring-up):** BMI270 (SPI) and ADXL367 (I²C) both produce sane readings — ~±1 g on the gravity axis at rest, noise-floor-level signal on the other axes. BMI270 is configured at 4 g / 500 dps / 100 Hz per the v1 annotation schema. **Note:** Z-axis signs are opposite between BMI270 (+1 g) and ADXL367 (-1 g) because the two chips are mounted in different orientations on the PCB — handle this at the algorithm fusion layer.
 - **M3 (external flash):** LittleFS mounted at `/lfs` on an 8 MB `littlefs_storage` partition carved out of `external_flash` by the NCS partition manager. Persistence verified — `/lfs/boot_count` increments across hardware resets. 4096-byte erase blocks, 512-cycle wear threshold. Partition range: `0x4d2000`–`0xcd2000` (8 MB); remainder of external flash (`0xcd2000`–`0x2000000`, ~19 MB) stays free for future use.
+- **M4 (session logging):** 256-byte packed binary header (`src/session.h`) stamps the 13 FIRMWARE + 12 PRE-WALK fields from the v1 annotation schema; body is 28-byte packed sample records (uptime_ms + 3×float accel m/s² + 3×float gyro rad/s) from BMI270 at 100 Hz. UUIDv4 from the TF-M PSA RNG. Files land at `/lfs/sessions/<uuid>.dat`. SW0 short-press toggles start/stop. On close, the header is base64-logged to UART so the host ingest script can round-trip without needing the USB mass-storage path (that's M5). First live session: 16.5 s, 1,444 samples, 0 flash errors, every controlled-vocab enum decoded cleanly through `tools/read_session.py`. **Known rough edges:** sampling captures ~87 % of theoretical (1444/1650 at 100 Hz) because `fs_write` in the sampler thread occasionally blocks past the next 10 ms tick — size of the RAM batch buffer and/or moving writes to a work queue are M5 cleanup items; battery_mv_{start,end} and session_*_utc_ms stay 0 until the nPM1300 fuel-gauge + RTC sync land later.
 
 The repo is pushed to GitHub at `https://github.com/Jabl1629/gosteady-firmware` — though as of this update, local has substantial uncommitted work beyond the initial scaffold commit.
 
@@ -396,7 +397,7 @@ timestamp_ms  accel_x_g  accel_y_g  accel_z_g  gyro_x_dps  gyro_y_dps  gyro_z_dp
 
 ## Immediate Next Steps
 
-Milestones 1–3 are done. Next is **Milestone 4 — session logging**: define a versioned binary session file format that stamps the 13 FIRMWARE fields + 12 PRE-WALK fields from the v1 annotation schema (see *Data Collection Plan*) into the file header, then streams IMU samples at 100 Hz into the body. File rolls on each BLE `start_session` / `stop_session` pair (those commands land in Milestone 6); for M4 we can prove the path with a bench-triggered session. Target file name scheme: `/lfs/sessions/<session_uuid>.dat`. 
+Milestones 1–4 are done. Next is **Milestone 5 — USB dump path**: expose the `/lfs` mount (or at least `/lfs/sessions/`) as USB mass storage or a CDC-based dump endpoint, so the host can pull session `.dat` files off the device without J-Link. Also a good chance to fix the M4 sample-rate drop by moving `fs_write` off the sampler thread onto a workqueue (so sampling doesn't stall while flash pages erase). Once that lands, the ingest script graduates from parsing base64 headers over UART to reading real binary files straight off the filesystem. 
 
 ---
 
