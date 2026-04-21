@@ -25,6 +25,7 @@
 #include <stdlib.h>
 
 #include "session.h"
+#include "dump.h"
 
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
@@ -351,6 +352,11 @@ int main(void)
 			sampler_entry, NULL, NULL, NULL,
 			5, 0, K_NO_WAIT);
 	k_thread_name_set(&sampler_thread, "sampler");
+
+	/* Bring up the host-facing dump channel on uart1. */
+	if (gosteady_dump_start() < 0) {
+		LOG_WRN("dump channel failed to start — file pull disabled");
+	}
 
 	LOG_INF("Bring-up complete. Press SW0 to start/stop a session.");
 

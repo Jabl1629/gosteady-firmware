@@ -18,3 +18,14 @@
 &accel {
 	status = "okay";
 };
+
+/*
+ * Milestone 5: route the nRF9151 uart1 (1 Mbaud, already pinctrl'd in
+ * the board DTS) to the firmware. The nRF5340 connectivity bridge
+ * already forwards this UART to the second USB-CDC endpoint
+ * (/dev/cu.usbmodem105 on the host). That becomes the file-transfer
+ * channel for pulling session .dat files off /lfs.
+ */
+&uart1 {
+	status = "okay";
+};

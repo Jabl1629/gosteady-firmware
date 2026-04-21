@@ -45,3 +45,7 @@ nordic resources/
 # Per-user Claude Code settings (agent/skill configs etc. stay in .claude/
 # at the project level, but local overrides and permissions are user-specific).
 .claude/settings.local.json
+
+# Default output directory for tools/pull_sessions.py. Per-run capture
+# artifacts, keyed by UUID — no value checking them into the repo.
+sessions/
