@@ -16,6 +16,7 @@
  */
 
 #include "dump.h"
+#include "control.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -35,8 +36,10 @@ LOG_MODULE_REGISTER(gs_dump, LOG_LEVEL_INF);
 #endif
 
 #define SESSION_DIR     "/lfs/sessions"
-#define MAX_LINE_LEN    128
-#define UART_RX_BUFSZ   256
+/* START payload is 12-field JSON — can easily run ~300 chars. Matches
+ * MAX_JSON_BYTES in control.c so control.h's limit is the narrower one. */
+#define MAX_LINE_LEN    512
+#define UART_RX_BUFSZ   1024
 #define FILE_CHUNK_SZ   512  /* bytes per fs_read during DUMP */
 
 static const struct device *const dump_uart = DEVICE_DT_GET(DUMP_UART_NODE);
@@ -116,7 +119,17 @@ static int read_line(char *buf, size_t buf_sz, k_timeout_t byte_timeout)
 		}
 		buf[len++] = (char)b;
 	}
-	/* Overflow — discard and treat as no line. */
+	/* Overflow. Drain the rest of the in-flight line up to the next
+	 * newline so subsequent commands aren't misaligned on the leftover
+	 * bytes of this one. */
+	while (1) {
+		uint8_t b;
+		if (ring_buf_get(&rx_ring, &b, 1) == 0) {
+			k_sleep(K_MSEC(5));
+			continue;
+		}
+		if (b == '\n') { break; }
+	}
 	buf[0] = '\0';
 	return -EMSGSIZE;
 }
@@ -235,6 +248,15 @@ static void dump_entry(void *p1, void *p2, void *p3)
 			cmd_del(line + 4);
 		} else if (strcmp(line, "PING") == 0) {
 			dump_write("PONG\n", 5);
+		} else if (gosteady_control_recognises(line)) {
+			char resp[96];
+			int n = gosteady_control_execute(line, resp, sizeof(resp));
+			if (n < 0) {
+				dump_write("ERR response overflow\n", 22);
+			} else {
+				dump_write(resp, (size_t)n);
+				dump_write("\n", 1);
+			}
 		} else {
 			dump_write("ERR unknown\n", 12);
 		}

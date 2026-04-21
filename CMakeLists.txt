@@ -7,4 +7,5 @@ target_sources(app PRIVATE
   src/main.c
   src/session.c
   src/dump.c
+  src/control.c
 )
