@@ -309,7 +309,13 @@
     connState.textContent = 'Connected';
     connState.className = 'connected';
     stopBtn.disabled = false;
+    // Auto-open the log panel on connect — useful while we're still
+    // shaking bugs out; easy to close again via the Log button.
+    logEl.classList.add('open');
     log('sys', 'connected');
+    // Re-render so the run buttons pick up the newly-available rxChar
+    // (they were disabled at initial page-load time when we had no BLE).
+    renderMatrix();
     // Kick off a status poll
     sendCommand('STATUS');
   }
@@ -322,6 +328,9 @@
     stopBtn.disabled = true;
     rxChar = null; txChar = null;
     setSessionActive(false);
+    // setSessionActive is a no-op if state didn't change, so force a
+    // re-render to propagate the loss of rxChar to the row buttons.
+    renderMatrix();
     log('sys', 'disconnected');
   }
 
