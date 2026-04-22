@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0d12" />
+  <title>GoSteady v1 Capture</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --panel: #141822;
+      --panel-2: #1b2130;
+      --ink: #e8ecf4;
+      --ink-dim: #9aa3b8;
+      --accent: #6aa7ff;
+      --ok: #3bd671;
+      --bad: #ff4d5a;
+      --warn: #f3b14a;
+      --done: #2a6e4c;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      min-height: 100vh;
+      padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: var(--panel);
+      padding: 12px 16px 10px; padding-top: calc(12px + env(safe-area-inset-top, 0));
+      border-bottom: 1px solid #232a3c;
+      display: flex; gap: 12px; align-items: center;
+    }
+    header h1 {
+      font-size: 15px; margin: 0; font-weight: 600; flex: 1; letter-spacing: -0.01em;
+    }
+    #conn-btn {
+      padding: 10px 16px; border-radius: 10px; border: 0; font-size: 14px; font-weight: 600;
+      background: var(--accent); color: white;
+    }
+    #conn-btn.connected { background: var(--ok); }
+    #conn-state { font-size: 12px; color: var(--ink-dim); }
+    #conn-state.connected { color: var(--ok); }
+    #conn-state.disconnected { color: var(--bad); }
+
+    #status-card {
+      margin: 12px 16px; padding: 14px 16px; background: var(--panel);
+      border-radius: 12px; display: grid; grid-template-columns: 1fr 1fr;
+      gap: 6px 12px; font-size: 13px;
+    }
+    #status-card .label { color: var(--ink-dim); }
+    #status-card .value { text-align: right; font-variant-numeric: tabular-nums; }
+    .session-on  { color: var(--ok); font-weight: 600; }
+    .session-off { color: var(--ink-dim); }
+
+    main { padding: 0 16px 140px; } /* pad to keep content above fixed STOP */
+
+    .surface-group {
+      margin: 14px 0; background: var(--panel); border-radius: 12px; overflow: hidden;
+    }
+    .surface-group > h2 {
+      margin: 0; padding: 12px 14px; font-size: 14px; font-weight: 600;
+      background: var(--panel-2); border-bottom: 1px solid #232a3c;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .surface-group > h2 .count {
+      margin-left: auto; font-size: 12px; color: var(--ink-dim); font-weight: 500;
+    }
+
+    .run-list { list-style: none; padding: 6px 6px 8px; margin: 0; }
+    .run-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 6px; border-radius: 10px;
+    }
+    .run-row .idx {
+      flex: 0 0 26px; text-align: center; font-size: 11px; color: var(--ink-dim);
+      font-variant-numeric: tabular-nums;
+    }
+    .run-btn {
+      flex: 1; padding: 12px 14px; border-radius: 10px; border: 0;
+      background: var(--panel-2); color: var(--ink); text-align: left;
+      font-size: 13px; line-height: 1.35; font-family: inherit;
+      display: flex; flex-direction: column; gap: 2px; min-height: 56px;
+    }
+    .run-btn:active { background: #263042; }
+    .run-btn:disabled { opacity: 0.55; }
+    .run-btn .title { font-weight: 600; }
+    .run-btn .meta { font-size: 11px; color: var(--ink-dim); }
+    .run-btn.active {
+      outline: 2px solid var(--accent); background: #1d293e;
+    }
+    .run-row.completed .run-btn {
+      background: var(--done);
+    }
+    .run-row.completed .run-btn .meta { color: #cfe4d9; }
+    .run-badge {
+      flex: 0 0 auto; min-width: 36px; padding: 4px 8px; border-radius: 999px;
+      background: transparent; color: var(--ink-dim); font-size: 11px;
+      font-variant-numeric: tabular-nums; text-align: right;
+    }
+    .run-row.completed .run-badge { color: #cfe4d9; }
+
+    footer {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      padding: 10px 16px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0));
+      background: linear-gradient(to top, var(--bg) 70%, rgba(11,13,18,0));
+      display: flex; gap: 10px;
+    }
+    #stop-btn {
+      flex: 1; padding: 18px; border-radius: 14px; border: 0;
+      background: var(--bad); color: white; font-size: 18px; font-weight: 700;
+      font-family: inherit;
+    }
+    #stop-btn:disabled { background: #5a2428; color: #b08890; }
+    #log-toggle {
+      flex: 0 0 auto; padding: 18px 16px; border-radius: 14px; border: 1px solid #232a3c;
+      background: var(--panel); color: var(--ink); font-size: 14px;
+    }
+
+    #log {
+      margin: 14px 16px 120px; background: #000; border-radius: 10px;
+      padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px; max-height: 200px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all;
+      display: none; color: #9aa3b8;
+    }
+    #log.open { display: block; }
+    #log .tx { color: #6aa7ff; }
+    #log .rx { color: #3bd671; }
+    #log .err { color: #ff4d5a; }
+    #log .sys { color: #f3b14a; }
+
+    .reset-row { margin: 18px 16px; text-align: center; }
+    .reset-row button {
+      background: transparent; border: 1px solid #232a3c; color: var(--ink-dim);
+      padding: 10px 14px; border-radius: 10px; font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>GoSteady v1 Capture</h1>
+    <div id="conn-state" class="disconnected">Disconnected</div>
+  </div>
+  <button id="conn-btn">Connect</button>
+</header>
+
+<div id="status-card">
+  <div class="label">Session</div>
+  <div class="value session-off" id="session-state">idle</div>
+  <div class="label">Runs this capture</div>
+  <div class="value" id="session-count">0</div>
+  <div class="label">Last response</div>
+  <div class="value" id="last-response">—</div>
+</div>
+
+<main id="run-matrix"></main>
+
+<div class="reset-row">
+  <button id="reset-btn">Reset completed-row tracking (new capture)</button>
+</div>
+
+<div id="log"></div>
+
+<footer>
+  <button id="stop-btn" disabled>STOP</button>
+  <button id="log-toggle">Log</button>
+</footer>
+
+<script>
+(() => {
+  'use strict';
+
+  // NUS UUIDs (all lower-case for Web Bluetooth).
+  const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const NUS_RX_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+  const NUS_TX_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+  // Fields that are constant across every v1 run.
+  const COMMON = {
+    subject_id:   'S00',
+    walker_type:  'two_wheel',
+    cap_type:     'glide',
+    walker_model: 'unspecified',
+    mount_config: 'front_left_leg',
+    operator:     'jace',
+  };
+
+  // 30-run matrix, from GoSteady_Capture_Protocol_v1.docx.
+  // Keys match the annotation spreadsheet columns exactly.
+  const RUNS = [
+    // Indoor polished concrete — runs 1..10
+    { idx: 1,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_straight', intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'warmup' },
+    { idx: 2,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 3,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 4,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 5,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'variance repeat' },
+    { idx: 6,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_long',     intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'long distance' },
+    { idx: 7,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_short',    intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 8,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_curve',    intended_distance_ft: 20, intended_speed: 'normal', direction: 's_curve',  run_type: 'normal',              note: 'weave 2 cones' },
+    { idx: 9,  group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_straight', intended_distance_ft: 0,  intended_speed: 'slow',   direction: 'straight', run_type: 'stationary_baseline', note: '30s parked' },
+    { idx: 10, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'concrete_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'stumble',             note: 'simulated near-trip' },
+
+    // Outdoor concrete sidewalk — runs 11..20
+    { idx: 11, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_straight', intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'warmup' },
+    { idx: 12, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 13, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 14, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 15, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'variance repeat' },
+    { idx: 16, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_long',     intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'long distance' },
+    { idx: 17, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_short',    intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 18, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_curve',    intended_distance_ft: 20, intended_speed: 'normal', direction: 's_curve',  run_type: 'normal',              note: 'weave 2 cones' },
+    { idx: 19, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_straight', intended_distance_ft: 0,  intended_speed: 'slow',   direction: 'straight', run_type: 'stationary_baseline', note: '30s parked' },
+    { idx: 20, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'sidewalk_straight', intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'pickup',              note: 'walker lifted briefly' },
+
+    // Indoor low-pile carpet — runs 21..30
+    { idx: 21, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_straight', intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'warmup' },
+    { idx: 22, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 23, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 24, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 25, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'variance repeat' },
+    { idx: 26, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_long',     intended_distance_ft: 30, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: 'long (indoor limit 30 ft)' },
+    { idx: 27, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_short',    intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal',              note: '' },
+    { idx: 28, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_curve',    intended_distance_ft: 15, intended_speed: 'normal', direction: 's_curve',  run_type: 'normal',              note: 'furniture weave, 15 ft' },
+    { idx: 29, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_straight', intended_distance_ft: 0,  intended_speed: 'slow',   direction: 'straight', run_type: 'stationary_baseline', note: '30s parked' },
+    { idx: 30, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'carpet_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'stumble',             note: 'simulated near-trip' },
+  ];
+
+  const GROUP_LABEL = {
+    indoor_polished_concrete: 'Indoor polished concrete',
+    outdoor_concrete_sidewalk: 'Outdoor concrete sidewalk',
+    indoor_low_pile_carpet:   'Indoor low-pile carpet',
+  };
+
+  // ---- State --------------------------------------------------------
+
+  let bleDevice = null;
+  let rxChar = null;
+  let txChar = null;
+  let rxBuffer = '';
+  let sessionActive = false;
+  let activeRunIdx = null;      // which preset row is currently recording
+  const completions = {};       // idx -> [{timestamp, duration_ms}, ...]
+  let sessionCount = 0;         // total successful starts this page session
+
+  // ---- DOM ----------------------------------------------------------
+
+  const $ = (id) => document.getElementById(id);
+  const connBtn  = $('conn-btn');
+  const connState = $('conn-state');
+  const sessionStateEl = $('session-state');
+  const sessionCountEl = $('session-count');
+  const lastRespEl = $('last-response');
+  const stopBtn = $('stop-btn');
+  const logEl = $('log');
+  const logToggle = $('log-toggle');
+  const resetBtn = $('reset-btn');
+
+  // ---- Logging ------------------------------------------------------
+
+  function log(kind, text) {
+    const t = new Date().toTimeString().slice(0, 8);
+    const span = document.createElement('span');
+    span.className = kind;
+    span.textContent = `[${t}] ${text}\n`;
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+    while (logEl.children.length > 80) logEl.removeChild(logEl.firstChild);
+  }
+
+  logToggle.addEventListener('click', () => logEl.classList.toggle('open'));
+
+  // ---- BLE ----------------------------------------------------------
+
+  async function connect() {
+    try {
+      log('sys', 'requesting device…');
+      bleDevice = await navigator.bluetooth.requestDevice({
+        filters: [{ services: [NUS_SERVICE] }],
+      });
+      bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+      log('sys', `picked ${bleDevice.name || '(unnamed)'}, connecting…`);
+      const server = await bleDevice.gatt.connect();
+      const service = await server.getPrimaryService(NUS_SERVICE);
+      rxChar = await service.getCharacteristic(NUS_RX_UUID);
+      txChar = await service.getCharacteristic(NUS_TX_UUID);
+      await txChar.startNotifications();
+      txChar.addEventListener('characteristicvaluechanged', onNotify);
+      onConnected();
+    } catch (e) {
+      log('err', `connect failed: ${e.message || e}`);
+      onDisconnected();
+    }
+  }
+
+  async function disconnect() {
+    if (bleDevice && bleDevice.gatt.connected) {
+      try { bleDevice.gatt.disconnect(); } catch (_) {}
+    }
+    onDisconnected();
+  }
+
+  function onConnected() {
+    connBtn.textContent = 'Disconnect';
+    connBtn.classList.add('connected');
+    connState.textContent = 'Connected';
+    connState.className = 'connected';
+    stopBtn.disabled = false;
+    log('sys', 'connected');
+    // Kick off a status poll
+    sendCommand('STATUS');
+  }
+
+  function onDisconnected() {
+    connBtn.textContent = 'Connect';
+    connBtn.classList.remove('connected');
+    connState.textContent = 'Disconnected';
+    connState.className = 'disconnected';
+    stopBtn.disabled = true;
+    rxChar = null; txChar = null;
+    setSessionActive(false);
+    log('sys', 'disconnected');
+  }
+
+  function onNotify(event) {
+    const decoder = new TextDecoder();
+    rxBuffer += decoder.decode(event.target.value);
+    let nl;
+    while ((nl = rxBuffer.indexOf('\n')) !== -1) {
+      const line = rxBuffer.slice(0, nl).replace(/\r$/, '');
+      rxBuffer = rxBuffer.slice(nl + 1);
+      handleResponseLine(line);
+    }
+  }
+
+  function handleResponseLine(line) {
+    if (!line) return;
+    log('rx', `← ${line}`);
+    lastRespEl.textContent = line.length > 24 ? line.slice(0, 24) + '…' : line;
+
+    if (line.startsWith('STATUS active=1')) setSessionActive(true);
+    else if (line.startsWith('STATUS active=0')) setSessionActive(false);
+    else if (line.startsWith('OK started'))      setSessionActive(true);
+    else if (line.startsWith('OK samples='))     setSessionActive(false);
+    else if (line.startsWith('ERR'))             /* leave session state as-is */;
+  }
+
+  async function sendCommand(line) {
+    if (!rxChar) { log('err', 'not connected'); return false; }
+    try {
+      const bytes = new TextEncoder().encode(line + '\n');
+      // NUS RX supports write-without-response for low-latency writes. If
+      // the characteristic doesn't advertise that property Safari/Bluefy
+      // will throw; fall back to writeValueWithResponse then.
+      try {
+        await rxChar.writeValueWithoutResponse(bytes);
+      } catch (_) {
+        await rxChar.writeValueWithResponse(bytes);
+      }
+      log('tx', `→ ${line.length > 80 ? line.slice(0, 77) + '…' : line}`);
+      return true;
+    } catch (e) {
+      log('err', `write failed: ${e.message || e}`);
+      return false;
+    }
+  }
+
+  // ---- Session state ------------------------------------------------
+
+  function setSessionActive(active) {
+    if (sessionActive === active) return;
+    sessionActive = active;
+    sessionStateEl.textContent = active ? 'RECORDING' : 'idle';
+    sessionStateEl.className = 'value ' + (active ? 'session-on' : 'session-off');
+    if (!active && activeRunIdx !== null) {
+      markCompleted(activeRunIdx);
+      activeRunIdx = null;
+    }
+    renderMatrix();
+  }
+
+  function markCompleted(idx) {
+    const ts = new Date();
+    completions[idx] = completions[idx] || [];
+    completions[idx].push({ ts, duration_ms: null });
+    persistCompletions();
+  }
+
+  function persistCompletions() {
+    try {
+      const snap = {};
+      for (const k of Object.keys(completions)) {
+        snap[k] = completions[k].map(c => ({ ts: c.ts.toISOString() }));
+      }
+      localStorage.setItem('gosteady_completions', JSON.stringify(snap));
+    } catch (_) {}
+  }
+
+  function loadCompletions() {
+    try {
+      const raw = localStorage.getItem('gosteady_completions');
+      if (!raw) return;
+      const snap = JSON.parse(raw);
+      for (const k of Object.keys(snap)) {
+        completions[k] = snap[k].map(c => ({ ts: new Date(c.ts) }));
+      }
+    } catch (_) {}
+  }
+
+  function resetCompletions() {
+    if (!confirm('Clear completed-row tracking for a new capture? (This only resets the page-local log — files already on flash are untouched.)')) return;
+    for (const k of Object.keys(completions)) delete completions[k];
+    sessionCount = 0;
+    persistCompletions();
+    renderMatrix();
+    updateCounters();
+  }
+
+  function updateCounters() {
+    sessionCountEl.textContent = String(sessionCount);
+  }
+
+  // ---- Run matrix UI -----------------------------------------------
+
+  function buildStartPayload(run) {
+    return {
+      ...COMMON,
+      course_id: run.course_id,
+      intended_distance_ft: run.intended_distance_ft,
+      surface: run.surface,
+      intended_speed: run.intended_speed,
+      direction: run.direction,
+      run_type: run.run_type,
+    };
+  }
+
+  async function startRun(run) {
+    if (sessionActive) {
+      alert('A session is already recording. Press STOP first.');
+      return;
+    }
+    const payload = buildStartPayload(run);
+    const line = 'START ' + JSON.stringify(payload);
+    activeRunIdx = run.idx;
+    sessionCount += 1;
+    updateCounters();
+    renderMatrix();
+    const ok = await sendCommand(line);
+    if (!ok) { activeRunIdx = null; sessionCount -= 1; updateCounters(); renderMatrix(); }
+  }
+
+  async function stopRun() {
+    if (!rxChar) return;
+    await sendCommand('STOP');
+    // setSessionActive(false) will fire on the OK samples= notification
+  }
+
+  function renderMatrix() {
+    const matrix = $('run-matrix');
+    matrix.innerHTML = '';
+    const groups = {};
+    for (const r of RUNS) (groups[r.group] = groups[r.group] || []).push(r);
+
+    for (const groupKey of Object.keys(groups)) {
+      const section = document.createElement('section');
+      section.className = 'surface-group';
+      const runs = groups[groupKey];
+      const done = runs.filter(r => completions[r.idx]?.length).length;
+
+      section.innerHTML = `
+        <h2>
+          ${GROUP_LABEL[groupKey]}
+          <span class="count">${done} / ${runs.length}</span>
+        </h2>
+        <ul class="run-list"></ul>
+      `;
+      const list = section.querySelector('.run-list');
+
+      for (const r of runs) {
+        const li = document.createElement('li');
+        li.className = 'run-row';
+        const runCount = completions[r.idx]?.length || 0;
+        if (runCount) li.classList.add('completed');
+        if (activeRunIdx === r.idx) li.classList.add('active');
+
+        const btn = document.createElement('button');
+        btn.className = 'run-btn' + (activeRunIdx === r.idx ? ' active' : '');
+        btn.disabled = !rxChar || sessionActive;
+        btn.innerHTML = `
+          <span class="title">${r.run_type} — ${r.intended_distance_ft} ft — ${r.intended_speed} — ${r.direction}</span>
+          <span class="meta">${r.course_id}${r.note ? ' · ' + r.note : ''}</span>
+        `;
+        btn.addEventListener('click', () => startRun(r));
+
+        const idx = document.createElement('div');
+        idx.className = 'idx';
+        idx.textContent = r.idx;
+
+        const badge = document.createElement('div');
+        badge.className = 'run-badge';
+        if (runCount === 0) badge.textContent = '';
+        else if (runCount === 1) {
+          const t = completions[r.idx][0].ts.toTimeString().slice(0, 5);
+          badge.textContent = t;
+        } else {
+          badge.textContent = `×${runCount}`;
+        }
+
+        li.appendChild(idx);
+        li.appendChild(btn);
+        li.appendChild(badge);
+        list.appendChild(li);
+      }
+
+      matrix.appendChild(section);
+    }
+  }
+
+  // ---- Wire up ------------------------------------------------------
+
+  connBtn.addEventListener('click', () => {
+    if (bleDevice && bleDevice.gatt.connected) disconnect();
+    else connect();
+  });
+  stopBtn.addEventListener('click', stopRun);
+  resetBtn.addEventListener('click', resetCompletions);
+
+  // Sanity: is Web Bluetooth available?
+  if (!navigator.bluetooth) {
+    log('err', 'Web Bluetooth not supported. Use Bluefy on iOS or Chrome on Android.');
+    connBtn.disabled = true;
+    connBtn.textContent = 'Unsupported';
+  }
+
+  loadCompletions();
+  renderMatrix();
+  updateCounters();
+  log('sys', 'ready — tap Connect to pair with the Thingy:91 X UART.');
+
+  // Periodic status poll so the UI tracks the firmware state even if
+  // buttons are pressed elsewhere (e.g., SW0 on the bench).
+  setInterval(() => {
+    if (rxChar) sendCommand('STATUS').catch(() => {});
+  }, 5000);
+})();
+</script>
+
+</body>
+</html>

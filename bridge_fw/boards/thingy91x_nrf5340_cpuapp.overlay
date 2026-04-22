@@ -1,0 +1,61 @@
+/*
+ * Copyright (c) 2023 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ */
+
+
+/ {
+	dp0 {
+		compatible = "zephyr,swdp-gpio";
+		status = "okay";
+		clk-gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
+		dio-gpios = <&gpio0 27 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 7 GPIO_ACTIVE_HIGH>;
+		port-write-cycles = <12>;
+	};
+
+	zephyr,user {
+		reset-gpios = <&gpio1 7 GPIO_ACTIVE_HIGH>;
+	};
+
+	chosen {
+		zephyr,console = &rtt0;
+		zephyr,shell-uart = &rtt0;
+		zephyr,uart-mcumgr = &rtt0;
+		zephyr,bt-mon-uart = &rtt0;
+		zephyr,bt-c2h-uart = &rtt0;
+	};
+
+	ramdisk0 {
+		compatible = "zephyr,ram-disk";
+		disk-name = "RAM";
+		sector-size = <512>;
+		sector-count = <128>;
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&uart1 {
+	status = "okay";
+	/* GoSteady M6b: nRF9151's uart1 runs at 1 Mbaud (see the nRF9151
+	 * board DTS). USB CDC reconfigures the baud dynamically via
+	 * SET_LINE_CODING, but BLE peer events pass baudrate=0 ("keep the
+	 * current/default"). Default this to 1 Mbaud so the BLE path has
+	 * matching baud without a special case. */
+	current-speed = <1000000>;
+};
+
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+
+	cdc_acm_uart1: cdc_acm_uart1 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
