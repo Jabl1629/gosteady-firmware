@@ -361,13 +361,23 @@
     if (!rxChar) { log('err', 'not connected'); return false; }
     try {
       const bytes = new TextEncoder().encode(line + '\n');
-      // NUS RX supports write-without-response for low-latency writes. If
-      // the characteristic doesn't advertise that property Safari/Bluefy
-      // will throw; fall back to writeValueWithResponse then.
-      try {
-        await rxChar.writeValueWithoutResponse(bytes);
-      } catch (_) {
-        await rxChar.writeValueWithResponse(bytes);
+      // Chunk to stay inside the ATT MTU window. Empirically, a single
+      // ~270-byte START payload either triggers Chrome's long-write
+      // fallback (Prepare+Execute Write) or exceeds the bridge's NUS RX
+      // reassembly path, and the 91 never sees a newline-terminated line
+      // — no OK, no ERR, just silence. Splitting into <=180B chunks keeps
+      // every write inside writeValueWithoutResponse's fast path for any
+      // reasonable negotiated MTU (>=23 legacy, typically 247 on Nordic).
+      // See GOSTEADY_CONTEXT.md "Key Design Decisions" for the rationale
+      // on chunking vs. rearchitecting the protocol.
+      const CHUNK = 180;
+      for (let off = 0; off < bytes.length; off += CHUNK) {
+        const slice = bytes.subarray(off, Math.min(off + CHUNK, bytes.length));
+        try {
+          await rxChar.writeValueWithoutResponse(slice);
+        } catch (_) {
+          await rxChar.writeValueWithResponse(slice);
+        }
       }
       log('tx', `→ ${line.length > 80 ? line.slice(0, 77) + '…' : line}`);
       return true;
