@@ -60,6 +60,44 @@ def _read_exact(ser: serial.Serial, n: int, timeout_s: float = 30.0) -> bytes:
     return bytes(buf)
 
 
+# uart1 is a shared channel: the bridge forwards the nRF9151's uart1 TX
+# to BOTH the USB CDC endpoint we read on AND the BLE NUS TX notify the
+# capture.html page subscribes to. If capture.html is connected, its 5 s
+# STATUS poll causes the 91 to emit "STATUS active=N\n" on uart1 TX,
+# which we see on USB between our DUMP transactions. The firmware's
+# dispatch loop is serial so noise NEVER interleaves mid-transaction
+# (SIZE line, body bytes, and trailing "\nOK\n" are written in a tight
+# uncontested loop), but noise freely bleeds in BETWEEN transactions —
+# so every "expected line" read on the host side has to tolerate it.
+_NOISE_PREFIXES = (
+    "STATUS active=",     # triggered by a concurrent BLE STATUS poll
+    "PONG",               # a concurrent PING from another client
+    "GOSTEADY-DUMP",      # dump-thread startup banner if the board rebooted mid-pull
+    "OK started ",        # a concurrent START that completed on BLE
+    "OK samples=",        # a concurrent STOP that completed on BLE
+)
+
+
+def _is_noise(text: str) -> bool:
+    return any(text.startswith(p) or text == p.rstrip() for p in _NOISE_PREFIXES)
+
+
+def _read_protocol_line(ser: serial.Serial, timeout_s: float = 5.0) -> str:
+    """Read one line, skipping any recognised cross-channel noise from BLE.
+
+    Returns the first line that ISN'T noise. Raises TimeoutError if the
+    whole window goes by with nothing but noise.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        remaining = max(0.1, deadline - time.time())
+        line = _read_line(ser, timeout_s=remaining).decode("ascii", errors="replace")
+        if _is_noise(line):
+            continue
+        return line
+    raise TimeoutError(f"no protocol line within {timeout_s}s (all noise)")
+
+
 def connect(port: str, baud: int) -> serial.Serial:
     ser = serial.Serial(port, baud, timeout=0.5)
     ser.dtr = True  # wake up the nRF5340 bridge's CDC-to-UART forwarding
@@ -91,12 +129,18 @@ def list_files(ser: serial.Serial) -> list[tuple[str, int]]:
     ser.flush()
     out: list[tuple[str, int]] = []
     while True:
-        line = _read_line(ser).decode("ascii", errors="replace")
+        line = _read_protocol_line(ser)
         if line == "END":
             return out
         if line.startswith("ERR"):
             raise RuntimeError(f"LIST failed: {line}")
         name, _, size_s = line.partition(" ")
+        # Only accept entries that actually look like session files —
+        # anything else is unrecognised noise we'd rather skip loudly
+        # than mis-parse.
+        if not name.endswith(".dat"):
+            print(f"  (skipping unrecognised LIST line: {line!r})", file=sys.stderr)
+            continue
         try:
             out.append((name, int(size_s)))
         except ValueError:
@@ -107,18 +151,25 @@ def dump_file(ser: serial.Serial, name: str, dest: Path) -> int:
     ser.write(f"DUMP {name}\n".encode())
     ser.flush()
 
-    size_line = _read_line(ser).decode("ascii", errors="replace")
+    size_line = _read_protocol_line(ser)
     if size_line.startswith("ERR"):
         raise RuntimeError(f"DUMP {name}: {size_line}")
     if not size_line.startswith("SIZE "):
         raise RuntimeError(f"expected 'SIZE <n>', got {size_line!r}")
     size = int(size_line.split()[1])
 
+    # Body bytes are written by the firmware in an uncontested tight
+    # uart_poll_out loop — no BLE-triggered response can interleave
+    # MID-body (see dispatch loop in src/dump.c). Safe to read raw.
     body = _read_exact(ser, size)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(body)
 
-    # Trailing "\nOK\n" or "\nERR ...\n"
+    # Trailing "\nOK\n" or "\nERR ...\n". Also emits from the same
+    # tight loop, so no noise between body and status. But after
+    # status, the firmware may process a pending BLE command before
+    # the next DUMP — hence _read_protocol_line for the next call's
+    # size_line (handled by the caller's loop).
     tail = _read_line(ser).decode("ascii", errors="replace")  # empty (the \n after body)
     status = _read_line(ser).decode("ascii", errors="replace")
     if status != "OK":
@@ -129,7 +180,7 @@ def dump_file(ser: serial.Serial, name: str, dest: Path) -> int:
 def delete_file(ser: serial.Serial, name: str) -> None:
     ser.write(f"DEL {name}\n".encode())
     ser.flush()
-    status = _read_line(ser).decode("ascii", errors="replace")
+    status = _read_protocol_line(ser)
     if status != "OK":
         raise RuntimeError(f"DEL {name}: {status}")
 
