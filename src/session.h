@@ -199,6 +199,12 @@ int gosteady_session_stop(uint32_t *out_sample_count);
 /* True if a session is currently open and accepting samples. */
 bool gosteady_session_is_active(void);
 
+/* Format the currently-active session's UUIDv4 as canonical
+ * 36-char hyphenated string plus NUL (37 bytes). `out_sz` must
+ * be >= 37. Returns 0 on success, -ENODEV if no session is
+ * active, -EINVAL if `out` is too small. */
+int gosteady_session_get_uuid_str(char *out, size_t out_sz);
+
 #ifdef __cplusplus
 }
 #endif

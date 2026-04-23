@@ -191,10 +191,17 @@ static int cmd_start(const char *json_start, size_t json_len,
 	if (ret < 0) {
 		return snprintk(out, out_sz, "ERR start failed (%d)", ret);
 	}
-	/* session.c already LOG_INFs the UUID at start; don't duplicate
-	 * here. The host-side CLI can issue STATUS or scan the console if
-	 * it needs the UUID for correlation. */
-	return snprintk(out, out_sz, "OK started");
+	/* Echo the UUID back so transport-side clients (capture.html in
+	 * particular) can key their POST-WALK notes against the same
+	 * primary key the session file header carries. Falls back to a
+	 * bare "OK started" if the UUID somehow can't be fetched; the
+	 * protocol stays forward-compatible either way. */
+	char uuid_str[37];
+	int uret = gosteady_session_get_uuid_str(uuid_str, sizeof(uuid_str));
+	if (uret < 0) {
+		return snprintk(out, out_sz, "OK started");
+	}
+	return snprintk(out, out_sz, "OK started %s", uuid_str);
 }
 
 static int cmd_stop(char *out, size_t out_sz)

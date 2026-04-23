@@ -131,10 +131,79 @@
     #log .err { color: #ff4d5a; }
     #log .sys { color: #f3b14a; }
 
-    .reset-row { margin: 18px 16px; text-align: center; }
+    .reset-row { margin: 18px 16px; text-align: center; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
     .reset-row button {
       background: transparent; border: 1px solid #232a3c; color: var(--ink-dim);
       padding: 10px 14px; border-radius: 10px; font-size: 12px;
+      font-family: inherit;
+    }
+    .reset-row button.primary {
+      background: var(--panel); color: var(--ink); border-color: #2c3446;
+    }
+
+    /* ---- M3 post-walk overlay --------------------------------------- */
+    #pw-overlay {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,0.55);
+      display: none; align-items: flex-end; justify-content: center;
+      padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0));
+    }
+    #pw-overlay.open { display: flex; }
+    .pw-card {
+      width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto;
+      background: var(--panel); border-radius: 16px;
+      padding: 18px 18px 14px; color: var(--ink);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .pw-card h2 {
+      margin: 0 0 4px; font-size: 16px; font-weight: 600; letter-spacing: -0.01em;
+    }
+    .pw-card .pw-meta {
+      margin: 0 0 14px; font-size: 12px; color: var(--ink-dim);
+      font-variant-numeric: tabular-nums;
+    }
+    .pw-quick {
+      display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+    }
+    .pw-btn {
+      padding: 16px 10px; border-radius: 12px; border: 0;
+      font-size: 14px; font-weight: 600; font-family: inherit;
+      cursor: pointer; color: white;
+    }
+    .pw-btn.pw-good    { background: var(--ok); }
+    .pw-btn.pw-discard { background: var(--bad); }
+    .pw-btn.pw-notes   { background: var(--accent); }
+    .pw-btn.pw-back {
+      background: transparent; color: var(--ink-dim);
+      border: 1px solid #2c3446;
+    }
+    .pw-btn.pw-save { background: var(--ok); }
+    .pw-btn:disabled { opacity: 0.5; }
+
+    .pw-subpanel { display: none; margin-top: 14px; }
+    .pw-subpanel.open { display: block; }
+    .pw-subpanel label {
+      display: block; margin: 10px 0 3px; font-size: 12px; color: var(--ink-dim);
+    }
+    .pw-subpanel input[type=number],
+    .pw-subpanel input[type=text],
+    .pw-subpanel textarea,
+    .pw-subpanel select {
+      width: 100%; padding: 10px; border-radius: 8px;
+      background: var(--panel-2); border: 1px solid #2c3446;
+      color: var(--ink); font-size: 14px; font-family: inherit;
+      box-sizing: border-box;
+    }
+    .pw-subpanel textarea { resize: vertical; min-height: 56px; }
+    .pw-subpanel .pw-row-2 {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    }
+    .pw-subpanel .pw-form-actions {
+      display: flex; gap: 8px; margin-top: 14px;
+    }
+    .pw-subpanel .pw-form-actions .pw-btn { flex: 1; padding: 14px; }
+    .pw-subpanel .pw-hint {
+      font-size: 11px; color: var(--ink-dim); margin: 4px 0 0; line-height: 1.4;
     }
   </style>
 </head>
@@ -160,10 +229,101 @@
 <main id="run-matrix"></main>
 
 <div class="reset-row">
+  <button id="export-btn" class="primary">Export capture notes (JSON)</button>
   <button id="reset-btn">Reset completed-row tracking (new capture)</button>
 </div>
 
 <div id="log"></div>
+
+<!-- M3 post-walk overlay -------------------------------------------- -->
+<div id="pw-overlay" role="dialog" aria-modal="true" aria-labelledby="pw-title">
+  <div class="pw-card">
+    <h2 id="pw-title">Run <span id="pw-run-idx"></span> complete</h2>
+    <p class="pw-meta" id="pw-meta"></p>
+
+    <!-- Primary quick actions -->
+    <div class="pw-quick" id="pw-quick">
+      <button class="pw-btn pw-good"    type="button" data-pw-action="good">✓ Good</button>
+      <button class="pw-btn pw-discard" type="button" data-pw-action="discard">✗ Discard</button>
+      <button class="pw-btn pw-notes"   type="button" data-pw-action="notes">📝 Notes</button>
+    </div>
+
+    <!-- Discard reason (shown after tapping Discard) -->
+    <div class="pw-subpanel" id="pw-discard-panel">
+      <label for="pw-discard-reason">Discard reason</label>
+      <select id="pw-discard-reason">
+        <option value="bad_mount">bad_mount</option>
+        <option value="sensor_glitch">sensor_glitch</option>
+        <option value="incomplete_run" selected>incomplete_run</option>
+        <option value="wrong_course">wrong_course</option>
+        <option value="interruption">interruption</option>
+        <option value="operator_error">operator_error</option>
+      </select>
+      <label for="pw-discard-notes">Free notes (optional)</label>
+      <textarea id="pw-discard-notes" rows="2" placeholder="e.g. dog walked through course"></textarea>
+      <div class="pw-form-actions">
+        <button class="pw-btn pw-back" type="button" data-pw-action="back">Back</button>
+        <button class="pw-btn pw-save" type="button" data-pw-action="save-discard">Save discard</button>
+      </div>
+    </div>
+
+    <!-- Full notes form (shown after tapping Notes) -->
+    <div class="pw-subpanel" id="pw-notes-panel">
+      <label>Valid?</label>
+      <select id="pw-valid">
+        <option value="Y" selected>Y — keep this run</option>
+        <option value="N">N — discard</option>
+      </select>
+
+      <div class="pw-row-2">
+        <div>
+          <label for="pw-actual">Actual distance (ft)</label>
+          <input id="pw-actual" type="number" inputmode="decimal" step="0.1" placeholder="(same as intended)" />
+        </div>
+        <div>
+          <label for="pw-subj-speed">Subjective speed</label>
+          <select id="pw-subj-speed">
+            <option value="">(same as intended)</option>
+            <option value="slow">slow</option>
+            <option value="normal">normal</option>
+            <option value="fast">fast</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="pw-row-2">
+        <div>
+          <label for="pw-steps">Manual step count</label>
+          <input id="pw-steps" type="number" inputmode="numeric" placeholder="(optional)" />
+        </div>
+        <div>
+          <label for="pw-notes-discard">Discard reason</label>
+          <select id="pw-notes-discard">
+            <option value="">(none — valid run)</option>
+            <option value="bad_mount">bad_mount</option>
+            <option value="sensor_glitch">sensor_glitch</option>
+            <option value="incomplete_run">incomplete_run</option>
+            <option value="wrong_course">wrong_course</option>
+            <option value="interruption">interruption</option>
+            <option value="operator_error">operator_error</option>
+          </select>
+        </div>
+      </div>
+
+      <label for="pw-events">Events (semicolon-separated)</label>
+      <input id="pw-events" type="text" placeholder="e.g. stumble@0:07;pickup@0:15" />
+      <p class="pw-hint">Format: <code>&lt;event&gt;@&lt;mm:ss&gt;</code>. Events vocab: stumble, pickup, setdown, obstacle, interruption.</p>
+
+      <label for="pw-free">Free notes</label>
+      <textarea id="pw-free" rows="2" placeholder="any observations"></textarea>
+
+      <div class="pw-form-actions">
+        <button class="pw-btn pw-back" type="button" data-pw-action="back">Back</button>
+        <button class="pw-btn pw-save" type="button" data-pw-action="save-full">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <footer>
   <button id="stop-btn" disabled>STOP</button>
@@ -243,8 +403,18 @@
   let rxBuffer = '';
   let sessionActive = false;
   let activeRunIdx = null;      // which preset row is currently recording
+  let activeSessionUuid = null; // device-assigned UUID of currently-recording session
   const completions = {};       // idx -> [{timestamp, duration_ms}, ...]
   let sessionCount = 0;         // total successful starts this page session
+
+  // POST-WALK notes, keyed by session_uuid. Joined against .dat files
+  // at ingest time (tools/ingest_capture.py).
+  const postWalkNotes = {};     // uuid -> { run_idx, completed_utc, valid, ... }
+
+  // Set by the STOP handler before the M3 popup opens, so the popup
+  // handlers know which run they're saving against even after
+  // setSessionActive(false) has cleared activeRunIdx.
+  let pwContext = null;         // { uuid, run_idx, run, sample_count }
 
   // ---- DOM ----------------------------------------------------------
 
@@ -350,11 +520,35 @@
     log('rx', `← ${line}`);
     lastRespEl.textContent = line.length > 24 ? line.slice(0, 24) + '…' : line;
 
-    if (line.startsWith('STATUS active=1')) setSessionActive(true);
-    else if (line.startsWith('STATUS active=0')) setSessionActive(false);
-    else if (line.startsWith('OK started'))      setSessionActive(true);
-    else if (line.startsWith('OK samples='))     setSessionActive(false);
-    else if (line.startsWith('ERR'))             /* leave session state as-is */;
+    if (line.startsWith('STATUS active=1')) {
+      setSessionActive(true);
+    } else if (line.startsWith('STATUS active=0')) {
+      setSessionActive(false);
+    } else if (line.startsWith('OK started')) {
+      // "OK started <uuid>" — parse the UUID off the end. Fallback to
+      // null if we got a bare "OK started" (shouldn't happen with
+      // post-2026-04-22 firmware but keep the tolerance).
+      const parts = line.split(/\s+/);
+      activeSessionUuid = parts.length >= 3 ? parts[2] : null;
+      setSessionActive(true);
+    } else if (line.startsWith('OK samples=')) {
+      // Capture the sample count + run idx + uuid BEFORE
+      // setSessionActive clears them, so we can hand a complete
+      // context to the M3 popup.
+      const m = line.match(/^OK samples=(\d+)/);
+      const sampleCount = m ? parseInt(m[1], 10) : null;
+      const uuid = activeSessionUuid;
+      const runIdx = activeRunIdx;
+      const run = RUNS.find(r => r.idx === runIdx) || null;
+      setSessionActive(false);
+      activeSessionUuid = null;
+      if (runIdx !== null && uuid && run) {
+        pwContext = { uuid, run_idx: runIdx, run, sample_count: sampleCount };
+        showPostWalkPopup();
+      }
+    } else if (line.startsWith('ERR')) {
+      /* leave session state as-is */
+    }
   }
 
   async function sendCommand(line) {
@@ -440,6 +634,190 @@
 
   function updateCounters() {
     sessionCountEl.textContent = String(sessionCount);
+  }
+
+  // ---- POST-WALK notes ---------------------------------------------
+
+  const POST_WALK_LS_KEY = 'gosteady_post_walk_notes_v1';
+
+  function persistPostWalkNotes() {
+    try { localStorage.setItem(POST_WALK_LS_KEY, JSON.stringify(postWalkNotes)); }
+    catch (_) {}
+  }
+
+  function loadPostWalkNotes() {
+    try {
+      const raw = localStorage.getItem(POST_WALK_LS_KEY);
+      if (!raw) return;
+      const snap = JSON.parse(raw);
+      for (const uuid of Object.keys(snap)) postWalkNotes[uuid] = snap[uuid];
+    } catch (_) {}
+  }
+
+  function savePostWalk(uuid, data) {
+    postWalkNotes[uuid] = { ...data };
+    persistPostWalkNotes();
+  }
+
+  function nowUtcIso() {
+    return new Date().toISOString();
+  }
+
+  // ---- M3 post-walk popup ------------------------------------------
+
+  const pwOverlay       = $('pw-overlay');
+  const pwRunIdxEl      = $('pw-run-idx');
+  const pwMetaEl        = $('pw-meta');
+  const pwQuick         = $('pw-quick');
+  const pwDiscardPanel  = $('pw-discard-panel');
+  const pwNotesPanel    = $('pw-notes-panel');
+  const pwDiscardReason = $('pw-discard-reason');
+  const pwDiscardNotes  = $('pw-discard-notes');
+  const pwValid         = $('pw-valid');
+  const pwActual        = $('pw-actual');
+  const pwSubjSpeed     = $('pw-subj-speed');
+  const pwSteps         = $('pw-steps');
+  const pwNotesDiscard  = $('pw-notes-discard');
+  const pwEvents        = $('pw-events');
+  const pwFree          = $('pw-free');
+
+  function showPostWalkPopup() {
+    if (!pwContext) return;
+    const { run, sample_count } = pwContext;
+    pwRunIdxEl.textContent = String(pwContext.run_idx);
+    pwMetaEl.textContent =
+      `${run.run_type} — ${run.intended_distance_ft} ft — ${run.intended_speed} — ${run.direction}` +
+      ` · ${run.course_id}` +
+      (sample_count !== null ? ` · samples=${sample_count}` : '');
+    // Reset sub-panels; always show the quick buttons on open.
+    pwQuick.style.display = '';
+    pwDiscardPanel.classList.remove('open');
+    pwNotesPanel.classList.remove('open');
+    // Prefill the full form with defaults from the current run.
+    pwValid.value = 'Y';
+    pwActual.value = '';
+    pwActual.placeholder = `(same as intended: ${run.intended_distance_ft})`;
+    pwSubjSpeed.value = '';
+    pwSteps.value = '';
+    pwNotesDiscard.value = '';
+    pwEvents.value = '';
+    pwFree.value = '';
+    pwDiscardReason.value = 'incomplete_run';
+    pwDiscardNotes.value = '';
+    pwOverlay.classList.add('open');
+  }
+
+  function closePostWalkPopup() {
+    pwOverlay.classList.remove('open');
+    pwContext = null;
+  }
+
+  function postWalkBaseRecord() {
+    return {
+      run_idx: pwContext.run_idx,
+      completed_utc: nowUtcIso(),
+      valid: 'Y',
+      actual_distance_ft: null,
+      subjective_speed: null,
+      manual_step_count: null,
+      events: '',
+      discard_reason: '',
+      free_notes: '',
+      sample_count: pwContext.sample_count,
+    };
+  }
+
+  function onQuickGood() {
+    if (!pwContext) return;
+    const rec = postWalkBaseRecord();
+    // "Good" path: valid=Y, all defaults, no notes. Minimal friction.
+    savePostWalk(pwContext.uuid, rec);
+    log('sys', `run ${rec.run_idx} saved as valid (uuid=${pwContext.uuid.slice(0,8)}…)`);
+    closePostWalkPopup();
+    renderMatrix();
+  }
+
+  function onQuickDiscard() {
+    pwQuick.style.display = 'none';
+    pwDiscardPanel.classList.add('open');
+  }
+
+  function onQuickNotes() {
+    pwQuick.style.display = 'none';
+    pwNotesPanel.classList.add('open');
+  }
+
+  function onBack() {
+    pwDiscardPanel.classList.remove('open');
+    pwNotesPanel.classList.remove('open');
+    pwQuick.style.display = '';
+  }
+
+  function onSaveDiscard() {
+    if (!pwContext) return;
+    const rec = postWalkBaseRecord();
+    rec.valid = 'N';
+    rec.discard_reason = pwDiscardReason.value;
+    rec.free_notes = pwDiscardNotes.value.trim();
+    savePostWalk(pwContext.uuid, rec);
+    log('sys', `run ${rec.run_idx} saved as DISCARD (${rec.discard_reason})`);
+    closePostWalkPopup();
+    renderMatrix();
+  }
+
+  function onSaveFull() {
+    if (!pwContext) return;
+    const rec = postWalkBaseRecord();
+    rec.valid = pwValid.value;
+    const actual = pwActual.value.trim();
+    rec.actual_distance_ft = actual === '' ? null : parseFloat(actual);
+    rec.subjective_speed = pwSubjSpeed.value || null;
+    const steps = pwSteps.value.trim();
+    rec.manual_step_count = steps === '' ? null : parseInt(steps, 10);
+    rec.events = pwEvents.value.trim();
+    rec.discard_reason = pwNotesDiscard.value || '';
+    rec.free_notes = pwFree.value.trim();
+    // Sanity: if valid=N and no discard reason, coerce a default.
+    if (rec.valid === 'N' && !rec.discard_reason) {
+      rec.discard_reason = 'operator_error';
+    }
+    savePostWalk(pwContext.uuid, rec);
+    log('sys', `run ${rec.run_idx} saved (valid=${rec.valid}${rec.discard_reason ? ', '+rec.discard_reason : ''})`);
+    closePostWalkPopup();
+    renderMatrix();
+  }
+
+  pwOverlay.addEventListener('click', (e) => {
+    const action = e.target.getAttribute && e.target.getAttribute('data-pw-action');
+    if (!action) return;
+    if (action === 'good')          onQuickGood();
+    else if (action === 'discard')  onQuickDiscard();
+    else if (action === 'notes')    onQuickNotes();
+    else if (action === 'back')     onBack();
+    else if (action === 'save-discard') onSaveDiscard();
+    else if (action === 'save-full')    onSaveFull();
+  });
+
+  // ---- Export capture notes ----------------------------------------
+
+  function exportPostWalkNotes() {
+    const payload = {
+      schema_version: 1,
+      exported_utc: nowUtcIso(),
+      device_serial: null, // firmware reports it in each .dat header; join there
+      notes: postWalkNotes,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    a.href = url;
+    a.download = `gosteady_capture_notes_${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    log('sys', `exported ${Object.keys(postWalkNotes).length} note(s)`);
   }
 
   // ---- Run matrix UI -----------------------------------------------
@@ -546,15 +924,17 @@
   });
   stopBtn.addEventListener('click', stopRun);
   resetBtn.addEventListener('click', resetCompletions);
+  $('export-btn').addEventListener('click', exportPostWalkNotes);
 
   // Sanity: is Web Bluetooth available?
   if (!navigator.bluetooth) {
-    log('err', 'Web Bluetooth not supported. Use Bluefy on iOS or Chrome on Android.');
+    log('err', 'Web Bluetooth not supported. Use Chrome (desktop) or Chrome on Android.');
     connBtn.disabled = true;
     connBtn.textContent = 'Unsupported';
   }
 
   loadCompletions();
+  loadPostWalkNotes();
   renderMatrix();
   updateCounters();
   log('sys', 'ready — tap Connect to pair with the Thingy:91 X UART.');

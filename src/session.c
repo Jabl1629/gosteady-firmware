@@ -349,6 +349,14 @@ bool gosteady_session_is_active(void)
 	return s_active;
 }
 
+int gosteady_session_get_uuid_str(char *out, size_t out_sz)
+{
+	if (out == NULL || out_sz < 37) { return -EINVAL; }
+	if (!s_active) { return -ENODEV; }
+	uuid_to_string(s_header.session_uuid, out);
+	return 0;
+}
+
 /* --- One-time writer init, runs at boot via SYS_INIT --- */
 
 static int session_writer_init(void)
