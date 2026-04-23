@@ -49,3 +49,9 @@ nordic resources/
 # Default output directory for tools/pull_sessions.py. Per-run capture
 # artifacts, keyed by UUID — no value checking them into the repo.
 sessions/
+
+# Canonical capture-archive location (GOSTEADY_CONTEXT.md "Post-Session
+# Ingest" step 2). Dated subdirectories hold the raw .dat files plus
+# the POST-WALK notes sidecar and any per-run log rotations. Bulk
+# binary data — keep out of git entirely.
+raw_sessions/
