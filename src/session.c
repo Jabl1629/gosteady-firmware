@@ -49,7 +49,8 @@ LOG_MODULE_REGISTER(gs_session, LOG_LEVEL_INF);
 K_MSGQ_DEFINE(sample_q, sizeof(struct gosteady_sample), SAMPLE_QUEUE_DEPTH, 4);
 static struct k_poll_signal stop_signal  = K_POLL_SIGNAL_INITIALIZER(stop_signal);
 static struct k_poll_signal start_signal = K_POLL_SIGNAL_INITIALIZER(start_signal);
-static K_SEM_DEFINE(stop_done_sem, 0, 1);
+static K_SEM_DEFINE(stop_done_sem,  0, 1);
+static K_SEM_DEFINE(start_done_sem, 0, 1);
 
 /* Writer thread stack + thread object. */
 K_THREAD_STACK_DEFINE(writer_stack, 3072);
@@ -154,14 +155,18 @@ static void writer_entry(void *p1, void *p2, void *p3)
 	size_t batch_fill = 0;
 
 	while (1) {
-		/* Block until either the current session has a sample ready
-		 * or a stop has been requested. The start signal lets the
-		 * writer sit quiescent between sessions. */
+		/* Block until a sample is ready, a stop has been requested,
+		 * or a start handshake has been raised. The start signal is
+		 * used by session_start() to synchronously flush any stale
+		 * state (stragglers enqueued during the previous session's
+		 * close window) before the new session opens its file. */
 		struct k_poll_event events[] = {
 			K_POLL_EVENT_STATIC_INITIALIZER(K_POLL_TYPE_MSGQ_DATA_AVAILABLE,
 							K_POLL_MODE_NOTIFY_ONLY, &sample_q, 0),
 			K_POLL_EVENT_STATIC_INITIALIZER(K_POLL_TYPE_SIGNAL,
 							K_POLL_MODE_NOTIFY_ONLY, &stop_signal, 0),
+			K_POLL_EVENT_STATIC_INITIALIZER(K_POLL_TYPE_SIGNAL,
+							K_POLL_MODE_NOTIFY_ONLY, &start_signal, 0),
 		};
 		int ret = k_poll(events, ARRAY_SIZE(events), K_FOREVER);
 		if (ret < 0) {
@@ -169,11 +174,33 @@ static void writer_entry(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Drain samples first so we don't lose any that arrived just
-		 * before a stop signal. */
+		/* Start-of-session handshake — handled FIRST so we clear any
+		 * stragglers left in local_batch or the msgq from the previous
+		 * stop's close window before the new session gets going. This
+		 * eliminates a race that otherwise lets 30-40 samples with the
+		 * PREVIOUS session's t_ms base leak into the new session's
+		 * file (see GOSTEADY_CONTEXT.md "Session recording" gotchas). */
+		if (events[2].state == K_POLL_STATE_SIGNALED) {
+			batch_fill = 0;
+			struct gosteady_sample discard;
+			while (k_msgq_get(&sample_q, &discard, K_NO_WAIT) == 0) {
+				/* drop any residual samples */
+			}
+			k_poll_signal_reset(&start_signal);
+			events[2].state = K_POLL_STATE_NOT_READY;
+			k_sem_give(&start_done_sem);
+		}
+
+		/* Drain samples — capture anything that arrived before (or
+		 * slightly after) a stop signal so we don't lose tail-end
+		 * samples. Post-stop stragglers that manage to arrive after
+		 * s_active has been cleared are additionally rejected by the
+		 * s_active guard below, and any that slip through are
+		 * cleaned up by the start-handshake on the next session. */
 		if (events[0].state == K_POLL_STATE_MSGQ_DATA_AVAILABLE) {
 			struct gosteady_sample s;
 			while (k_msgq_get(&sample_q, &s, K_NO_WAIT) == 0) {
+				if (!s_active) { continue; }
 				local_batch[batch_fill++] = s;
 				if (batch_fill == SAMPLE_BATCH_COUNT) {
 					(void)writer_flush(local_batch, &batch_fill);
@@ -191,6 +218,10 @@ static void writer_entry(void *p1, void *p2, void *p3)
 				LOG_ERR("stop close errors: hdr=%d close=%d",
 					hdr_ret, close_ret);
 			}
+			/* Belt-and-suspenders: writer_flush already resets this,
+			 * but an explicit reset here documents the contract that
+			 * local_batch owns no samples across a stop boundary. */
+			batch_fill = 0;
 			k_poll_signal_reset(&stop_signal);
 			events[1].state = K_POLL_STATE_NOT_READY;
 			k_sem_give(&stop_done_sem);
@@ -211,9 +242,19 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 		return ret;
 	}
 
-	/* Flush any stale samples from a prior session (e.g., samples
-	 * enqueued by the sampler after we called stop but before the
-	 * active flag was cleared). */
+	/* Reset the writer's state (local_batch) AND purge any stale
+	 * samples left in the msgq from the previous session's close
+	 * window. Done via a synchronous signal/ack handshake so that by
+	 * the time this returns, the writer is guaranteed to be back in
+	 * its k_poll wait with batch_fill=0 — no race possible with a
+	 * sampler enqueue from this session. Double-purge (we also purge
+	 * below after fs_open) is deliberate belt-and-suspenders. */
+	k_msgq_purge(&sample_q);
+	k_poll_signal_raise(&start_signal, 0);
+	int sem_ret = k_sem_take(&start_done_sem, K_SECONDS(2));
+	if (sem_ret < 0) {
+		LOG_ERR("writer start-ack timeout (%d) — proceeding anyway", sem_ret);
+	}
 	k_msgq_purge(&sample_q);
 
 	memset(&s_header, 0, sizeof(s_header));

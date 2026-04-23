@@ -203,7 +203,15 @@ def parse_header(raw: bytes) -> tuple[Header, list[str]]:
 
 
 def summarize_body(data: bytes) -> dict:
-    """Return {sample_count, first_sample, last_sample, duration_ms}."""
+    """Return body summary including duration, derived rate, and monotonicity.
+
+    `duration_ms` and `derived_rate_hz` are computed from min/max of all
+    t_ms values, not just first/last, so they stay correct even when
+    t_ms is non-monotonic. A non-monotonic stream indicates a firmware
+    bug (or a leftover pre-fix session file); `t_ms_monotonic` + the
+    `first_backward_jump` pointer flag it loudly so you can strip the
+    contaminated prefix downstream.
+    """
     if len(data) == 0:
         return {"sample_count": 0}
     if len(data) % SAMPLE_BYTES != 0:
@@ -212,14 +220,36 @@ def summarize_body(data: bytes) -> dict:
     count = len(data) // SAMPLE_BYTES
     first = struct.unpack(SAMPLE_FMT, data[:SAMPLE_BYTES])
     last = struct.unpack(SAMPLE_FMT, data[-SAMPLE_BYTES:])
-    return {
+
+    t_values = [struct.unpack_from("<I", data, i * SAMPLE_BYTES)[0] for i in range(count)]
+    t_min, t_max = min(t_values), max(t_values)
+    duration_ms = t_max - t_min
+    derived_rate_hz = round((count - 1) / (duration_ms / 1000.0), 2) if duration_ms > 0 else 0.0
+
+    backward_jumps = [
+        (i, t_values[i - 1], t_values[i])
+        for i in range(1, count)
+        if t_values[i] < t_values[i - 1]
+    ]
+
+    summary = {
         "sample_count": count,
         "first_sample": {"t_ms": first[0], "ax": first[1], "ay": first[2], "az": first[3],
                          "gx": first[4], "gy": first[5], "gz": first[6]},
         "last_sample": {"t_ms": last[0], "ax": last[1], "ay": last[2], "az": last[3],
                         "gx": last[4], "gy": last[5], "gz": last[6]},
-        "duration_ms": last[0] - first[0],
+        "duration_ms": duration_ms,
+        "derived_rate_hz": derived_rate_hz,
+        "t_ms_monotonic": len(backward_jumps) == 0,
     }
+    if backward_jumps:
+        i, prev_t, cur_t = backward_jumps[0]
+        summary["backward_jumps"] = len(backward_jumps)
+        summary["first_backward_jump"] = (
+            f"idx={i} ({100*i/count:.1f}% through body): "
+            f"t[{i-1}]={prev_t} → t[{i}]={cur_t} (Δ={cur_t - prev_t})"
+        )
+    return summary
 
 
 def pretty_print(hdr: Header, errs: list[str], body_summary: dict | None) -> None:
