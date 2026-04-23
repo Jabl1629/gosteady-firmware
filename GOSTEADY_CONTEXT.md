@@ -40,11 +40,13 @@ The Thingy:91 X has **no onboard debugger**. Flashing requires an external SWD p
 
 **USB enumeration:** comes from the **nRF5340 connectivity bridge** (not a J-Link OB, not direct nRF9151 USB). As of M6b we run our own fork (`bridge_fw/`) based on NCS v3.2.4's `applications/connectivity_bridge`. The bridge exposes three USB interfaces simultaneously:
 
-1. **CDC-ACM on `/dev/cu.usbmodem102`** → nRF9151 **uart0** @ 115200 (app console; `LOG_INF` output lands here).
-2. **CDC-ACM on `/dev/cu.usbmodem105`** → nRF9151 **uart1** @ 1 Mbaud (our dump / control channel; also the target of BLE NUS tunneling since M6b).
+1. **CDC-ACM on `/dev/cu.usbmodem*102`** → nRF9151 **uart0** @ 115200 (app console; `LOG_INF` output lands here).
+2. **CDC-ACM on `/dev/cu.usbmodem*105`** → nRF9151 **uart1** @ 1 Mbaud (our dump / control channel; also the target of BLE NUS tunneling since M6b).
 3. **Mass-storage volume** mounted on macOS as **`/Volumes/NO NAME`** (the volume label is literally `NO NAME`, not `THINGY91X` — easy to miss in Finder). Contains `Config.txt` for runtime options (notably `BLE_ENABLED`) and `README.txt`.
 
 The hex-format serial (e.g. `DAE5B718C2209445`) is the bridge's USB serial, not a J-Link OB serial. `802006700` is the external J-Link Mini — these are two separate devices, not two formats of the same ID.
+
+> **USB CDC endpoint digit-count varies.** macOS assigns these port numbers based on USB hub topology at enumeration time. Seen: `/dev/cu.usbmodem11102` / `11105` on first plug, dropping to `usbmodem1102` / `1105` after unplug-replug, or vice versa. **Always `ls /dev/cu.usbmodem*` after any physical replug** before invoking host-side tools. Any persistent script/glob should use a wildcard (`*1105`) rather than a hard-coded digit count.
 
 ### Physical UART wiring between the two SoCs
 
@@ -119,8 +121,10 @@ Things that have already bitten us at least once. Read before the next hardware 
 **Serial / USB:**
 
 - **`cat /dev/cu.usbmodem*` shows a dead console even when the app is logging.** The bridge holds UART RX back until DTR is asserted; plain `cat` doesn't. Use `screen`, `minicom`, `cu`, pyserial, or nRF Terminal — all assert DTR on open.
-- **nRF9151 uart1 runs at 1 Mbaud, not 115200.** Always open `/dev/cu.usbmodem105` at `baud=1000000`. CDC host opens trigger bridge-side `SET_LINE_CODING` → bridge physical uart1 reconfigures to match. Opening at the wrong baud just gets you binary garbage, not errors.
+- **nRF9151 uart1 runs at 1 Mbaud, not 115200.** Always open `/dev/cu.usbmodem*1105` at `baud=1000000`. CDC host opens trigger bridge-side `SET_LINE_CODING` → bridge physical uart1 reconfigures to match. Opening at the wrong baud just gets you binary garbage, not errors.
 - **Stale garbage in the nRF9151's uart1 parser ring-buffer** sticks around if a baud mismatch ever streamed random bytes into it. Symptom: clean commands come back as `ERR unknown`. Fix: send ~10 bare newlines (`\n` × 10) to flush the parser's line state, then retry. The parser treats blank lines as no-ops.
+- **USB CDC endpoints re-enumerate on every replug.** Seen on macOS: `/dev/cu.usbmodem11102`/`11105` on first plug, dropping a digit to `/dev/cu.usbmodem1102`/`1105` after an unplug-replug, or vice versa. The leading-digit reflects the USB hub topology slot macOS picked at enumeration. Always `ls /dev/cu.usbmodem*` before any host-side tool invocation after a physical replug. Hard-coding the digit-count in scripts is fragile — glob or autodetect if you're writing anything persistent.
+- **uart1 is a SHARED channel (USB ↔ BLE) — host tools must tolerate noise lines (fixed 2026-04-22).** The bridge forwards the 91's uart1 TX to BOTH the USB CDC endpoint AND the BLE NUS TX notify. When a BLE client is connected (e.g., capture.html's 5 s STATUS poll), its command responses bleed into the USB stream between our DUMP transactions. Symptom in `pull_sessions.py`: every file after the first few was a size-shifted copy of the next file's content, because the preceding DUMP's trailing `STATUS active=0\n` was being consumed as the next DUMP's `SIZE <n>\n`. The firmware's dispatch loop is serial so noise NEVER interleaves mid-body; it only appears between command transactions. Fix lives in `pull_sessions.py::_read_protocol_line()` — skips known noise prefixes (`STATUS active=`, `PONG`, `GOSTEADY-DUMP`, `OK started `, `OK samples=`). Reuse this helper in any new host tool that reads uart1.
 
 **BLE (M6b):**
 
@@ -159,7 +163,7 @@ Things that have already bitten us at least once. Read before the next hardware 
 
 ### Current State
 
-The repo is at a **BLE-controllable session-logging target** — the walker cap can be sealed and the operator drives `START` / `STOP` wirelessly from a phone. On boot (nRF9151 side): mount LittleFS, bump the boot counter, start a 100 Hz BMI270 sampling thread with a decoupled writer, wire SW0 as a bench-fallback toggle for session start/stop, bring up the uart1 dump/control channel. LED state tells the operator which mode they're in (solid green while recording, purple blink while idle). On the nRF5340 side: our patched connectivity bridge runs, exposing BLE NUS tunneled to uart1. As of **2026-04-21**, **Milestones 1–6 are complete**: toolchain, SDK, J-Link path, build+flash cycle, serial console, sensor drivers, LittleFS, session-file writer, USB host-pull path, BLE session control are all verified against real hardware.
+The repo is at a **BLE-controllable session-logging target with closed-loop POST-WALK capture** — the walker cap can be sealed and the operator drives `START` / `STOP` wirelessly from Chrome on the Mac, with a per-run popup that collects the operator's validity + notes decision in the same UI. On boot (nRF9151 side): mount LittleFS, bump the boot counter, start a 100 Hz BMI270 sampling thread with a decoupled writer, wire SW0 as a bench-fallback toggle for session start/stop, bring up the uart1 dump/control channel. LED state tells the operator which mode they're in (solid green while recording, purple blink while idle). On the nRF5340 side: our patched connectivity bridge runs, exposing BLE NUS tunneled to uart1. As of **2026-04-23**, **Milestones 1–7 are complete and shakedown-validated**: toolchain, SDK, J-Link path, build+flash cycle, serial console, sensor drivers, LittleFS, session-file writer, USB host-pull path, BLE session control, and the full POST-WALK capture-notes-to-spreadsheet pipeline are all verified against real hardware with a 10-run shakedown (Indoor Polished Concrete segment of the v1 matrix) that produced clean 100.00 Hz data on every file, zero `flash_errors`, zero `t_ms` monotonicity violations, and correct POST-WALK → session file joins on all 10.
 
 - **M1 (dev env):** `<inf> gosteady: heartbeat tick=N` prints at 1 Hz on `/dev/cu.usbmodem102`.
 - **M2 (sensor bring-up):** BMI270 (SPI) and ADXL367 (I²C) both produce sane readings — ~±1 g on the gravity axis at rest, noise-floor-level signal on the other axes. BMI270 is configured at 4 g / 500 dps / 100 Hz per the v1 annotation schema. **Note:** Z-axis signs are opposite between BMI270 (+1 g) and ADXL367 (-1 g) because the two chips are mounted in different orientations on the PCB — handle this at the algorithm fusion layer.
@@ -167,7 +171,8 @@ The repo is at a **BLE-controllable session-logging target** — the walker cap 
 - **M4 (session logging):** 256-byte packed binary header (`src/session.h`) stamps the 13 FIRMWARE + 12 PRE-WALK fields from the v1 annotation schema; body is 28-byte packed sample records (uptime_ms + 3×float accel m/s² + 3×float gyro rad/s) from BMI270 at 100 Hz. UUIDv4 from the TF-M PSA RNG. Files land at `/lfs/sessions/<uuid>.dat`. SW0 short-press toggles start/stop. On close, the header is base64-logged to UART so the host ingest script can round-trip without needing USB mass-storage. Every controlled-vocab enum decodes cleanly through `tools/read_session.py`.
 - **M5 (USB dump + sampler decoupling):** `src/dump.c` runs a tiny line protocol on nRF9151 uart1 (routed by the nRF5340 connectivity bridge to `/dev/cu.usbmodem105 @ 1 Mbaud`): `PING`, `LIST`, `DUMP <name>`, `DEL <name>`. `tools/pull_sessions.py` drives the host side — round-trips session files to local disk and cross-validates each with `read_session.py`. Under the hood, `src/session.c` was refactored: sampler thread now only does a non-blocking `k_msgq_put`; a dedicated writer thread drains the queue, batches into `fs_write`, and rewrites the header on close. Rate went from ~96 Hz → **100.08 Hz** (1,300 samples / 12.989 s body duration on a fresh bench session). `flash_errors` now means `dropped_samples` (queue-full events); stays 0 when headroom is adequate. `battery_mv_{start,end}` and `session_*_utc_ms` still stamp 0 until M12 / nPM1300 fuel gauge.
 - **M6a (transport-agnostic session control):** `src/control.c` parses `START <json>` / `STOP` / `STATUS` commands using Zephyr's JSON library against a schema mirroring `struct gosteady_prewalk`. All 7 controlled-vocab fields are string-validated against the v1 vocabulary; free-form strings are truncated-copied. The parser writes its response into a caller-provided buffer — transport-agnostic by design, so the M6b BLE bridge can tunnel the same commands from a NUS write without the nRF9151 firmware caring. Wired into `src/dump.c` as an additional dispatch target, so the existing uart1 channel now carries both file ops and session control. `tools/control.py` drives it from the host (supports named presets like `concrete-normal-20` so the operator doesn't hand-type JSON 30 times). End-to-end test: a preset-driven `start → sample → stop → pull` cycle produced a session file whose `course_id`, `intended_distance_ft`, and `operator_id` came through exactly as sent (and the other 9 fields all validate against the canonical vocabulary). The M4 button handler is still wired up as a fallback for bench work while the cap is open. Rate held at ~100 Hz through the JSON path.
-- **M6b (BLE control over NUS):** `bridge_fw/` is a vendored fork of Nordic's `applications/connectivity_bridge` with four surgical edits (see `bridge_fw/PATCHES.md`) that retarget the Nordic UART Service from uart0 to uart1 — the latter being where our M5/M6a command parser listens. The nRF5340 net core gets built as `ipc_radio` automatically via sysbuild and programmed alongside the app image. BLE is compiled in upstream but **gated off at runtime by default**; the operator enables it by editing `BLE_ENABLED=0` → `1` in `Config.txt` on the bridge's USB mass-storage endpoint and ejecting. `bridge_fw/boards/thingy91x_nrf5340_cpuapp.overlay` pins the bridge's uart1 default to 1 Mbaud so the BLE path's `baudrate=0` ("don't change") peer-conn event doesn't leave a 115200/1Mbaud mismatch against the nRF9151. **Operator-facing UI:** `tools/capture.html` is a single-file Web BLE page with a preset button per row of the v1 30-run capture matrix and a persistent STOP button; opened in **Bluefy** on iOS (Safari doesn't do Web Bluetooth), it drives the full `START {json} / STOP` cycle over NUS. End-to-end validation: `STATUS` sent from nRF Connect iOS returned `STATUS active=0` as a TX notification through the patched tunnel.
+- **M6b (BLE control over NUS):** `bridge_fw/` is a vendored fork of Nordic's `applications/connectivity_bridge` with four surgical edits (see `bridge_fw/PATCHES.md`) that retarget the Nordic UART Service from uart0 to uart1 — the latter being where our M5/M6a command parser listens. The nRF5340 net core gets built as `ipc_radio` automatically via sysbuild and programmed alongside the app image. BLE is compiled in upstream but **gated off at runtime by default**; the operator enables it by editing `BLE_ENABLED=0` → `1` in `Config.txt` on the bridge's USB mass-storage endpoint and ejecting. `bridge_fw/boards/thingy91x_nrf5340_cpuapp.overlay` pins the bridge's uart1 default to 1 Mbaud so the BLE path's `baudrate=0` ("don't change") peer-conn event doesn't leave a 115200/1Mbaud mismatch against the nRF9151. **Operator-facing UI:** `tools/capture.html` is a single-file Web Bluetooth page with a preset button per row of the v1 30-run capture matrix and a persistent STOP button. As of 2026-04-23 we drive it from **Chrome on the Mac** (not Bluefy on iOS — Bluefy's App Store build doesn't opt into `WKWebView.isInspectable` so Safari Web Inspector can't attach, blocking debug; Chrome gives us full DevTools + Claude-in-Chrome extension integration for end-to-end debugging).
+- **M7 (POST-WALK capture loop):** `capture.html` gained a post-STOP modal that fires on every `OK samples=N` notification with three fast-path actions — **✓ Good** (writes `valid=Y` with defaults), **✗ Discard** (writes `valid=N` + `discard_reason` dropdown), and **📝 Notes** (full 7-field form covering the POST-WALK annotation schema). Entries are keyed by `session_uuid` in `localStorage` under `gosteady_post_walk_notes_v1`; an **Export capture notes (JSON)** button downloads a schema-v1 sidecar to `~/Downloads`. On the firmware side, `control.c::cmd_start` now echoes the UUID in its response (`OK started <uuid>`) via a new `gosteady_session_get_uuid_str()` public API in `src/session.h`, so the browser can correlate its notes to the same primary key the session file header carries. `tools/ingest_capture.py` joins pulled `.dat` headers with the notes JSON and emits a CSV matching the `Captures` sheet of `GoSteady_Capture_Annotations_v1.xlsx` column-for-column (13 FIRMWARE + 12 PRE-WALK + 7 POST-WALK + 2 DERIVED), plus two trailing diagnostic columns (`run_idx`, `post_walk_status`) the operator drops before spreadsheet append. End-to-end validation: a 10-run shakedown across the Indoor Polished Concrete segment produced 10/10 clean session files (100.00 Hz, mono=✓, flash_errors=0, UUID-match) and 10/10 POST-WALK notes that joined cleanly at ingest. Stationary baseline (run 9) showed |a|=1.01g / |ω|=0°/s across 37 s of captured data; stumble run (run 10) showed a textbook 4.76g impulse at the event moment — IMU signal quality is solid at the hardware level.
 
 The repo is public on GitHub at `https://github.com/Jabl1629/gosteady-firmware` and also serves the operator UI via GitHub Pages at **`https://jabl1629.github.io/gosteady-firmware/tools/capture.html`** (auto-rebuilds on every push to `main`).
 
@@ -189,10 +194,14 @@ gosteady-firmware/
 │   ├── boards/thingy91x_nrf5340_cpuapp.overlay  # uart1 default 1 Mbaud (load-bearing!)
 │   └── src/modules/{ble_handler,uart_handler}.c # dev_idx 0→1 patches
 ├── tools/
-│   ├── capture.html                  # Web BLE operator page (served via GitHub Pages)
-│   ├── control.py                    # USB-uart1 command CLI with run-matrix presets
-│   ├── pull_sessions.py              # USB-uart1 LIST/DUMP session-file puller
+│   ├── capture.html                  # Web BLE operator page + M3 POST-WALK popup (GitHub Pages)
+│   ├── control.py                    # USB-uart1 command CLI with run-matrix presets (bench fallback)
+│   ├── pull_sessions.py              # USB-uart1 LIST/DUMP session-file puller (noise-tolerant)
+│   ├── cleanup_device.py             # Wipe /lfs/sessions before a fresh capture
+│   ├── ingest_capture.py             # Join .dat headers + POST-WALK notes JSON → spreadsheet CSV
 │   └── read_session.py               # Parse .dat file, validate against v1 vocabulary
+├── raw_sessions/                     # Per-capture-date archive (gitignored). Layout:
+│   └── YYYY-MM-DD/                   #   <uuid>.dat × N, notes JSON, capture_<date>.csv
 ├── data collection and protocols/    # v1 capture protocol + annotation spreadsheet
 ├── nordic resources/                 # Redistributable Nordic bundle (gitignored)
 ├── .claude/agents/embedded-systems.md
@@ -219,9 +228,9 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
 3. **External flash** — LittleFS on the 32 MB SPI NOR. *(done 2026-04-19)*
 4. **Session logging** — binary session files on flash with versioned header. *(done 2026-04-19)*
 5. **USB dump** — mass storage / CDC-ACM path for host-side extraction. *(done 2026-04-19)*
-6. **BLE control** — start/stop session commands over GATT (NUS). *(done 2026-04-21; M6a = parser, M6b = bridge fork + Web BLE page)*
-7. **Python CLI** — host tool for session control and data dump. *(arguably done — `tools/control.py` + `tools/pull_sessions.py` + `tools/capture.html` together cover the operator workflow; may not need a unified CLI after all)*
-8. **Dataset collection** — run the capture protocol end-to-end. *(← next — pending rehearsal first)*
+6. **BLE control** — start/stop session commands over GATT (NUS). *(done 2026-04-21; M6a = parser, M6b = bridge fork + Web BLE page. Further hardened 2026-04-22 with `sendCommand` chunking to ≤180 B to survive NUS → uart1 reassembly limits.)*
+7. **Python CLI** — host tool for session control and data dump. *(done 2026-04-23 — superseded by the M3 popup + `tools/ingest_capture.py` + `tools/cleanup_device.py` combination. `control.py` remains as the bench-open-cap fallback. No unified CLI needed; the operator workflow is fully browser-driven now.)*
+8. **Dataset collection** — run the capture protocol end-to-end. *(← next — 10/30 runs done as shakedown 2026-04-23 with all quality gates passing; runs 11-30 remaining.)*
 9. **Python algorithm** — distance estimator trained on the dataset.
 10. **C port** — move the estimator on-device.
 11. **Validation** — hold-out error characterization.
@@ -301,10 +310,11 @@ The canonical sources for this section are the two files in `data collection and
 These are hard blockers — capturing data the ingest pipeline can't handle is more expensive than waiting.
 
 - **Session logging to external flash** working end-to-end. ✅ *M4 — `/lfs/sessions/<uuid>.dat` with full versioned header.*
-- **Remote `start_session` / `stop_session` with full 12-field PRE-WALK payload** deliverable while the cap is sealed. ✅ *M6a + M6b — `tools/capture.html` over BLE NUS.*
+- **Remote `start_session` / `stop_session` with full 12-field PRE-WALK payload** deliverable while the cap is sealed. ✅ *M6a + M6b — `tools/capture.html` (Chrome on Mac) over BLE NUS.*
 - **Session-file pull path** from host after capture. ✅ *M5 — `tools/pull_sessions.py` over USB uart1.*
-- **Ingest validator** that reads each session file's header and cross-checks against the v1 vocabulary. ✅ *`tools/read_session.py`. Not yet a spreadsheet-writing batch-ingest — currently it just validates one file at a time and prints, which is enough for rehearsal; spreadsheet-row auto-population lands in M8 prep if/when needed.*
-- **Full end-to-end rehearsal** (BLE start → sealed-cap walk → stop → USB pull → validator pass) covering multiple preset rows. ⚠️ *Not yet passed. This is what the next session should drive to completion.*
+- **Ingest validator + spreadsheet row producer** that reads each session file's header and cross-checks against the v1 vocabulary. ✅ *`tools/read_session.py` validates (now with `t_ms_monotonic` flag + derived_rate_hz). `tools/ingest_capture.py` joins .dat headers + POST-WALK notes JSON and emits a CSV whose columns are ready to append to the `Captures` sheet.*
+- **POST-WALK notes capture** for every run, keyed by session_uuid. ✅ *M7 — capture.html post-STOP popup with Good/Discard/Notes fast-paths + localStorage persistence + JSON export.*
+- **Full end-to-end rehearsal** (BLE start → sealed-cap walk → stop → M3 popup → USB pull → ingest CSV) covering multiple preset rows. ✅ *2026-04-23 — 10-run shakedown across Indoor Polished Concrete (runs 1-10) with 10/10 pass on monotonicity, rate, flash_errors, UUID match, and POST-WALK join.*
 
 ### Run Matrix
 
@@ -361,14 +371,16 @@ From the `Vocabularies` sheet. Firmware's BLE start-session payload handling and
 | `valid` | `Y`, `N` |
 | `discard_reason` | `bad_mount`, `sensor_glitch`, `incomplete_run`, `wrong_course`, `interruption`, `operator_error` |
 
-### Firmware Implications (status as of M1–M6b)
+### Firmware Implications (status as of M1–M7)
 
 The schema forces several concrete firmware requirements. Status against what's implemented today:
 
-- ✅ **UUIDv4 generation** at session start for `session_uuid` — done via DTS-chosen entropy (PSA RNG via TF-M).
+- ✅ **UUIDv4 generation** at session start for `session_uuid` — done via DTS-chosen entropy (PSA RNG via TF-M). Echoed back to the host on `OK started <uuid>` so POST-WALK notes can key against it.
 - ✅ **Session file header format** serializes all 13 FIRMWARE + 12 PRE-WALK fields. Versioned (`GOSTEADY_SESSION_VERSION=1`, 256-byte packed struct).
 - ✅ **BLE `START` accepts + validates the full 12-field PRE-WALK payload** — Zephyr JSON library against `prewalk_descr` schema; all 7 controlled-vocab fields string-validated against the v1 vocabulary before firmware stamps anything. Invalid → `ERR <reason>`, no silent defaults.
 - ✅ **Flash integrity counter** — bumped on `k_msgq_put` failure (queue full = sample dropped). Reported as `flash_errors` in the header.
+- ✅ **Cross-session sample isolation** — writer thread local_batch reset via synchronous start-signal handshake in `session_start()` (fixed 2026-04-22). First sample of every session has `t_ms ≈ 0`; no stragglers from previous session's close window leak into the next file.
+- ✅ **POST-WALK layer capture** — 7 operator-judgment fields captured in the browser at STOP time (M7). Not in the session file header; keyed by `session_uuid` in a separate JSON sidecar. Join happens at ingest via `tools/ingest_capture.py`.
 - ⚠️ **RTC with UTC time** for `session_start_utc` / `session_end_utc`. Currently stamps `0` as a "not yet synced" sentinel. Waiting on M12 (cellular LTE time sync) or an alternative host-side stamp at ingest.
 - ⚠️ **Battery voltage** in millivolts, measured at both session start and end. Currently stamps `0`. Needs nPM1300 fuel-gauge wiring (separate side quest; ~half a day of work with `nrf_fuel_gauge` lib).
 
@@ -434,59 +446,76 @@ timestamp_ms  accel_x_g  accel_y_g  accel_z_g  gyro_x_dps  gyro_y_dps  gyro_z_dp
 
 ## Immediate Next Steps
 
-Milestones 1–6 are done but the **M6b BLE capture page has open questions** that need to be worked through before we can rehearse the real v1 protocol. Picking up:
+Milestones 1–7 are done and the 10-run shakedown (runs 1-10, Indoor Polished Concrete) passed every quality gate on 2026-04-23. Picking up:
 
-### 1. Set up Safari Web Inspector → Bluefy (highest priority)
+### 1. Complete the remaining 20 runs
 
-We were hitting the context window just as the capture page's button-tap path needed debugging, so this is the first thing the next session should do. The in-page Log panel catches some things but Safari's full DevTools over USB is what we actually need.
+**Outdoor concrete sidewalk (runs 11–20)** and **indoor low-pile carpet (runs 21–30)** per the run matrix in "Data Collection Plan". The shakedown validated the full pipeline end-to-end, so these are "just execute the protocol" — no tooling changes expected.
 
-**On iPhone:** Settings → Apps → Safari → Advanced → toggle **Web Inspector** on.
+**Capture-time command sequence** (paste into a shell on capture day):
 
-**On Mac:** Safari → Settings → Advanced → check **Show Develop menu in menu bar**.
+```bash
+cd ~/Documents/gosteady-firmware
+STAMP=$(date +%F)
+mkdir -p raw_sessions/$STAMP
 
-**To debug:** USB-connect phone, open the capture page in Bluefy on phone, then on Mac go to Safari → Develop → *[your iPhone name]* → **Bluefy** → the Bluefy tab. You get full Chrome-like DevTools: Console, Network, Elements, Sources, breakpoints, the whole thing.
+# Before each capture session: wipe the device so the pull only contains real runs
+PY=/opt/nordic/ncs/toolchains/185bb0e3b6/bin/python3
+$PY tools/cleanup_device.py --port /dev/cu.usbmodem*1105 --all --yes
 
-### 2. Work through the suspected `capture.html` issues
+# Open https://jabl1629.github.io/gosteady-firmware/tools/capture.html in Chrome,
+# click Connect, then walk the protocol row by row. Use the M3 popup at every STOP.
 
-Known / suspected from the last session:
+# Post-capture:
+$PY tools/pull_sessions.py --port /dev/cu.usbmodem*1105 \
+    --out raw_sessions/$STAMP/
+mv ~/Downloads/gosteady_capture_notes_$STAMP.json raw_sessions/$STAMP/
+$PY tools/ingest_capture.py \
+    --sessions raw_sessions/$STAMP/ \
+    --notes    raw_sessions/$STAMP/gosteady_capture_notes_$STAMP.json \
+    --out      raw_sessions/$STAMP/capture_$STAMP.csv
+```
 
-- **Run buttons may still not fire** after connect — the fix committed in `250ca57` adds a `renderMatrix()` call in `onConnected()` so the row buttons pick up the newly-available `rxChar`. Needs verification via Safari Web Inspector that taps register and `sendCommand('START ...')` actually runs.
-- **STOP button** — was reported as not working, but its disabled-state logic is independent of session state (just requires `rxChar`), so it *should* be live once connected. Confirm in dev tools.
-- **Full start/wave/stop/pull round-trip over BLE from the cap** has **not yet been verified end-to-end**. Bench-level BLE writes showed `STATUS active=0` returning cleanly through the tunnel (after the baud fix), but a full `START <full-12-field JSON>` → sampler runs → `STOP` → session file on flash with all fields correct → cleanly pulled via `tools/pull_sessions.py` → cleanly validated via `tools/read_session.py` has not been completed end-to-end. That validation is the gate for declaring the capture pipeline ready for M8.
-- **The JSON round-trip specifically** is the part most likely to hide bugs — the ~270-char START payload rides a BLE NUS characteristic through a ring-buffer ratio on the bridge side, through a 1 Mbaud UART, into our `read_line` that expects `\n` termination. Anywhere in that path, partial writes or MTU fragmentation could truncate or misalign. Test with several different preset payloads and verify every PRE-WALK field landed in the header.
+### 2. One open logistics question before outdoor runs
 
-### 3. Once the capture page is solid → rehearse, then M8
+**BLE range for the outdoor 40-ft Run 16.** Mac internal antenna range to the Thingy:91 X is typically fine indoors but near the edge at 40 ft outdoors. Three options in decreasing invasiveness: (a) Mac sits at course midpoint; (b) accept mid-run disconnects (firmware keeps sampling regardless — the browser just loses control until reconnect); (c) range-test Run 11 (warmup, 10 ft) before committing to the full outdoor set. Easiest is (c): if Run 11 pairs and round-trips cleanly, treat (a) as the operator convention and proceed.
 
-**Rehearsal:** full 30-row capture protocol with the cap sealed, phone driving via the capture page. Post-rehearsal, disassemble, pull files via `tools/pull_sessions.py --rm`, validate every header, check for any dropped samples, flash_errors, or field drift. Issues feed back as small fixes.
+### 3. After capture → dataset archive + M9
 
-**After rehearsal passes:** M8 real data collection. At that point, M7 (dedicated Python CLI wrapping BLE + USB) may be unnecessary — the current toolset (`capture.html` for BLE control, `pull_sessions.py` for USB dump, `read_session.py` for validation) already covers the operator workflow. Only fold these into a single CLI if the workflow reveals a need. 
+**Dataset deliverable:** each `raw_sessions/<date>/` becomes the v1 capture archive. Append the `capture_<date>.csv` rows (first 34 columns) to the `Captures` sheet of `GoSteady_Capture_Annotations_v1.xlsx`, commit the raw_sessions archive (currently gitignored — move it to a long-term storage location or publish as a Git LFS / release artifact).
+
+**M9 (Python algorithm):** train/validate the step-based distance estimator from `GoSteady/null_old_fw/` on the fresh 30-run v1 dataset. Expected improvement over the 9-run calibration set: lower MAPE due to tacky→glide cap difference, tighter stride regression from the two-wheel walker's continuous glide signal.
 
 ---
 
 ## Host-side operator tooling
 
-Four tools, all in `tools/`. They share the same line-protocol with the firmware; they differ only in transport and UX.
+Six tools, all in `tools/`. They share the same line-protocol with the firmware; they differ only in transport and UX.
 
 | Tool | Transport | Purpose |
 |---|---|---|
-| `tools/capture.html` | BLE NUS via Bluefy on iOS | Operator UI during a sealed-cap capture run. 30 preset buttons from the v1 matrix; big STOP button pinned at the bottom; auto-opens a response log on connect. Completion badges persisted in `localStorage`. Served at **`https://jabl1629.github.io/gosteady-firmware/tools/capture.html`** (GitHub Pages). |
-| `tools/control.py` | USB `/dev/cu.usbmodem105` @ 1 Mbaud | Bench equivalent of `capture.html` for when the cap is open. Same `START` / `STOP` / `STATUS` commands, same preset dict as `capture.html`, plus a `raw` subcommand for arbitrary lines. |
-| `tools/pull_sessions.py` | USB `/dev/cu.usbmodem105` @ 1 Mbaud | Post-session file pull. `LIST`s the session directory, `DUMP`s each file to local disk (`./sessions/<uuid>.dat` by default), optionally `DEL`s on device with `--rm`. |
-| `tools/read_session.py` | — (offline) | Parses a pulled `.dat` file or a base64 header string, validates every controlled-vocab field against the v1 vocabulary, prints FIRMWARE + PRE-WALK + body summary. Used as both a dev validator and a dry-run ingest. |
+| `tools/capture.html` | BLE NUS via **Chrome on Mac** (not Bluefy/iOS anymore — see M6b notes) | Operator UI during a sealed-cap capture run. 30 preset buttons from the v1 matrix; pinned STOP button; auto-opens a response log on connect. **Post-STOP modal** captures POST-WALK notes per run (M7). Completion badges + notes persisted in `localStorage`. **Export capture notes (JSON)** button downloads a schema-v1 sidecar. Served at **`https://jabl1629.github.io/gosteady-firmware/tools/capture.html`** (GitHub Pages). |
+| `tools/control.py` | USB `/dev/cu.usbmodem*1105` @ 1 Mbaud | Bench equivalent of `capture.html` for when the cap is open. Same `START` / `STOP` / `STATUS` commands, same preset dict as `capture.html`, plus a `raw` subcommand for arbitrary lines. |
+| `tools/pull_sessions.py` | USB `/dev/cu.usbmodem*1105` @ 1 Mbaud | Post-session file pull. `LIST`s the session directory, `DUMP`s each file to local disk (`./sessions/<uuid>.dat` by default; conventionally used with `--out raw_sessions/<date>/`), optionally `DEL`s on device with `--rm`. Noise-tolerant `_read_protocol_line()` handles cross-channel STATUS bleed from a concurrent BLE client. |
+| `tools/cleanup_device.py` | USB `/dev/cu.usbmodem*1105` @ 1 Mbaud | Wipe `/lfs/sessions/` before a fresh capture. Dry-run by default; `--all --yes` for unattended use. Reuses pull_sessions.py's transport. |
+| `tools/ingest_capture.py` | — (offline) | Joins pulled `.dat` files (`--sessions DIR`) with POST-WALK notes JSON (`--notes FILE`) on `session_uuid`, emits a CSV matching the `Captures` sheet of `GoSteady_Capture_Annotations_v1.xlsx` column-for-column. Warns on missing notes, orphan notes, and header errors. |
+| `tools/read_session.py` | — (offline) | Parses a pulled `.dat` file or a base64 header string, validates every controlled-vocab field against the v1 vocabulary, prints FIRMWARE + PRE-WALK + body summary. Reports `duration_ms` / `derived_rate_hz` from min/max `t_ms` (robust to non-monotonic streams), and flags `t_ms_monotonic=false` + the first backward jump so contaminated pre-fix session files self-identify loudly. |
 
 **Firmware-side command protocol** (same on USB uart1 and BLE NUS after M6b):
 
 ```
 PING\n              → PONG\n
 STATUS\n            → STATUS active={0|1}\n
-START <json>\n      → OK started\n    (or ERR <reason>\n)
-STOP\n              → OK samples=N\n  (or ERR not active\n)
+START <json>\n      → OK started <uuid>\n   (or ERR <reason>\n) — UUID added 2026-04-23 (M7)
+STOP\n              → OK samples=N\n        (or ERR not active\n)
 LIST\n              → <name> <size>\n ... END\n
 DUMP <name>\n       → SIZE <n>\n <n raw bytes> \nOK\n
-DEL <name>\n        → OK\n            (or ERR <reason>\n)
+DEL <name>\n        → OK\n                  (or ERR <reason>\n)
 ```
 
 All commands are newline-terminated. `\n` is a literal `0x0A` byte — no escape-sequence parsing.
+
+**Shared-channel caveat:** uart1 is a broadcast channel — the bridge forwards the 91's uart1 TX to BOTH the USB CDC endpoint AND the BLE NUS TX notify. If a BLE client (capture.html) is connected, its 5 s STATUS poll causes `STATUS active=0\n` to appear on the USB stream between any other host's command transactions. The firmware's dispatch loop is serial so noise NEVER interleaves mid-transaction (body bytes are safe), but any host tool that reads uart1 must **skip recognised noise lines** when looking for its expected response. `tools/pull_sessions.py::_read_protocol_line()` does this — reuse it in new host tools.
 
 ---
 
@@ -508,12 +537,20 @@ All commands are newline-terminated. `\n` is a literal `0x0A` byte — no escape
 - **Binary session file with versioned 256-byte header** — `_Static_assert`ed on-device, `struct.calcsize`'d on-host, so C/Python drift fails loudly on either side.
 - **Sampler thread decoupled from fs_write via k_msgq** — sampler's only job is "sample and enqueue"; a dedicated writer thread batches flash writes. Rate went 96 Hz → 100 Hz when we made this change; `flash_errors` now means "queue-full drops" rather than "fs_write short-returns".
 - **Transport-agnostic command parser** (`src/control.c`) — same parser handles USB uart1 and BLE NUS. Adding a new transport (cellular in M12? another BLE service?) is a nRF5340-side change only.
-- **BLE, not cellular, for v1 operator control** — operator is always in the room during capture; phone-in-pocket + Bluefy page is the right UX. Cellular is overkill for v1 and adds indoor-coverage / backend failure modes that would kill data capture. Cellular is M12/M13 for production telemetry upload, not session control.
+- **BLE, not cellular, for v1 operator control** — operator is always in the room during capture; a Web Bluetooth page is the right UX. Cellular is overkill for v1 and adds indoor-coverage / backend failure modes that would kill data capture. Cellular is M12/M13 for production telemetry upload, not session control.
 - **Don't delete bad runs, mark `valid=N`** — canonical per v1 capture protocol. Firmware has a `DEL` command available to the ingest script for deliberate cleanup, but the operator UI (`capture.html`) has no delete button. All files survive to post-session review.
 - **Bridge firmware vendored wholesale** into `bridge_fw/` rather than patched at build-time. 264 KB of Nordic source in the repo is fine; the build-system fragility of a patch-on-build approach would be worse.
 - **Browser-side chunking of BLE writes instead of slimming the protocol (2026-04-22).** Found during M6b end-to-end validation: the ~270-byte `START` JSON doesn't make it through the BLE NUS RX → bridge → uart1 path (see Known Gotchas). Considered moving to a short `START <uuid>` with host-side metadata and lean session headers, which is architecturally cleaner and closer to how cellular telemetry will look in M12+. Chose instead to chunk the outbound write at ≤180 B in `capture.html` and keep session files fully self-describing, because (a) the chunking patch is 6 lines and ~10 min to ship; (b) a lean rewrite touches `control.c`, `session.h/c`, `capture.html`, `control.py`, `read_session.py` plus re-validation on hardware, a 1–2 day cost against the immediate goal of v1 capture; (c) self-describing session files preserve metadata recoverability if the host-side state is ever lost between `START` and ingest; (d) the natural time to revisit is M12–M14 when we're wiring cellular + backend + custom PCB anyway — the lean protocol falls out of that work informed by production requirements, not a guess.
-- **Web BLE page on GitHub Pages**, not a native iOS app — a single static HTML file shipped from the repo auto-redeploys on every push, and iOS via Bluefy gives us NUS access without the React Native / Flutter BLE dance. Native app can come later if needed.
+- **Web BLE page on GitHub Pages**, not a native iOS app — a single static HTML file shipped from the repo auto-redeploys on every push. Originally intended for Bluefy on iOS; as of 2026-04-23 we run it in **Chrome on the Mac** instead (Bluefy's App Store build doesn't opt into `WKWebView.isInspectable`, so Safari Web Inspector can't attach — Chrome gives us full DevTools + Claude-in-Chrome extension visibility for debugging). For the 30-run v1 capture the Mac sits at course midpoint; operator walks the course and returns to the laptop between runs. Native iOS app / phone-in-pocket workflow deferred until the debug need goes away.
+
+**M7 architecture:**
+
+- **POST-WALK captured in the browser at STOP time, NOT in the session file header (2026-04-23).** Considered expanding `struct gosteady_session_header` to include the 7 POST-WALK fields so sessions stay self-describing for POST-WALK too. Chose instead to keep POST-WALK in a separate JSON sidecar (`gosteady_capture_notes_<date>.json`) keyed by `session_uuid`, joined at ingest by `tools/ingest_capture.py`. Rationale: (a) POST-WALK is operator judgment, not device state — no reason the firmware needs to know; (b) editing POST-WALK after the fact is trivial in a JSON file, hard in a 256-byte packed binary header; (c) versioning the POST-WALK schema independently is safer; (d) the firmware's 256-byte header already has `_reserved[67]` for room-to-grow on FIRMWARE/PRE-WALK fields but we didn't want to burn that on POST-WALK. The join tool is responsible for reconciling the two sides.
+- **`session_uuid` echoed on `OK started <uuid>` as the join key.** Without this the browser has no way to correlate its POST-WALK entry to the specific `.dat` file on flash (the header UUID is known only to the 91 until LIST/DUMP at ingest). `gosteady_session_get_uuid_str()` in `src/session.h` is the public API. Backward-compatible: a bare `OK started` still parses on the browser side (UUID becomes null, POST-WALK still saves by position — but we'd lose the primary-key guarantee, so don't regress the echo).
+- **Post-STOP modal, not an inline form.** Alternatives considered: (a) full POST-WALK form always visible as a side panel; (b) per-row edit icon on completed rows. Went with (a)+(b) hybrid: modal on STOP forces an in-the-moment decision (`valid=Y/N` is the one field that's hard to reconstruct later), and the modal's three paths (Good / Discard / Notes) trade off friction for expressiveness. Tap-to-edit on completed rows deferred until it's actually needed — `capture.html` is currently write-once per run and that's been fine through the shakedown.
 
 **Runtime gates we know about:**
 - `BLE_ENABLED=1` in `Config.txt` on `/Volumes/NO NAME` — gets wiped by `west flash --recover`, needs re-toggle after.
-- iOS "Forget This Device" after every bridge reflash or iOS occupies the single BLE connection slot.
+- **Chrome remembers the BLE pairing per-origin** for the capture.html URL, so reconnects are usually one-click. If Chrome's BLE chooser starts re-prompting, `chrome://settings/content/bluetoothDevices` is where persistent permissions live.
+- **USB CDC endpoints re-enumerate on replug** (macOS may drop or add a leading digit: `11105` ↔ `1105`). Re-check `ls /dev/cu.usbmodem*` before any host-side tool invocation after a physical replug.
+- *(Legacy — iOS-only, not applicable to Chrome-on-Mac workflow):* "Forget This Device" after every bridge reflash, or iOS occupies the single BLE connection slot.
