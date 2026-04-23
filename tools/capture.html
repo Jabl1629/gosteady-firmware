@@ -624,10 +624,14 @@
   }
 
   function resetCompletions() {
-    if (!confirm('Clear completed-row tracking for a new capture? (This only resets the page-local log — files already on flash are untouched.)')) return;
+    if (!confirm('Clear completed-row tracking AND POST-WALK notes for a new capture? '
+               + '(This only resets the page-local log — files already on flash are untouched. '
+               + 'Export your notes first if you want to keep them.)')) return;
     for (const k of Object.keys(completions)) delete completions[k];
+    for (const k of Object.keys(postWalkNotes)) delete postWalkNotes[k];
     sessionCount = 0;
     persistCompletions();
+    persistPostWalkNotes();
     renderMatrix();
     updateCounters();
   }
