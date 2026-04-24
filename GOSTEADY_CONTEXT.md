@@ -163,7 +163,7 @@ Things that have already bitten us at least once. Read before the next hardware 
 
 ### Current State
 
-The repo is at a **BLE-controllable session-logging target with closed-loop POST-WALK capture** — the walker cap can be sealed and the operator drives `START` / `STOP` wirelessly from Chrome on the Mac, with a per-run popup that collects the operator's validity + notes decision in the same UI. On boot (nRF9151 side): mount LittleFS, bump the boot counter, start a 100 Hz BMI270 sampling thread with a decoupled writer, wire SW0 as a bench-fallback toggle for session start/stop, bring up the uart1 dump/control channel. LED state tells the operator which mode they're in (solid green while recording, purple blink while idle). On the nRF5340 side: our patched connectivity bridge runs, exposing BLE NUS tunneled to uart1. As of **2026-04-23**, **Milestones 1–7 are complete and shakedown-validated**: toolchain, SDK, J-Link path, build+flash cycle, serial console, sensor drivers, LittleFS, session-file writer, USB host-pull path, BLE session control, and the full POST-WALK capture-notes-to-spreadsheet pipeline are all verified against real hardware with a 10-run shakedown (Indoor Polished Concrete segment of the v1 matrix) that produced clean 100.00 Hz data on every file, zero `flash_errors`, zero `t_ms` monotonicity violations, and correct POST-WALK → session file joins on all 10.
+The repo is at a **BLE-controllable session-logging target with closed-loop POST-WALK capture + a v1 Python distance estimator calibrated on the 10-run shakedown set** — the walker cap can be sealed and the operator drives `START` / `STOP` wirelessly from Chrome on the Mac, with a per-run popup that collects the operator's validity + notes decision in the same UI. On boot (nRF9151 side): mount LittleFS, bump the boot counter, start a 100 Hz BMI270 sampling thread with a decoupled writer, wire SW0 as a bench-fallback toggle for session start/stop, bring up the uart1 dump/control channel. LED state tells the operator which mode they're in (solid green while recording, purple blink while idle). On the nRF5340 side: our patched connectivity bridge runs, exposing BLE NUS tunneled to uart1. As of **2026-04-24**, **Milestones 1–7 are complete and shakedown-validated** and **M9 Phase 1–3 are done** (Python algorithm calibrated on the 10-run set as a framework shakedown, to be re-fit at 30 runs). **M8 is paused at 10/30 runs** by decision — we chose to develop the algorithm pipeline end-to-end first so the remaining 20 runs feed directly into a validated framework rather than defining it. Phase 3's chosen v1 algorithm delivers **16.4% MAPE / 3.45 ft MAE** LOO on the 10-run set with both robustness gates passing; streaming-first by construction so the M10 C port is a direct translation.
 
 - **M1 (dev env):** `<inf> gosteady: heartbeat tick=N` prints at 1 Hz on `/dev/cu.usbmodem102`.
 - **M2 (sensor bring-up):** BMI270 (SPI) and ADXL367 (I²C) both produce sane readings — ~±1 g on the gravity axis at rest, noise-floor-level signal on the other axes. BMI270 is configured at 4 g / 500 dps / 100 Hz per the v1 annotation schema. **Note:** Z-axis signs are opposite between BMI270 (+1 g) and ADXL367 (-1 g) because the two chips are mounted in different orientations on the PCB — handle this at the algorithm fusion layer.
@@ -173,6 +173,7 @@ The repo is at a **BLE-controllable session-logging target with closed-loop POST
 - **M6a (transport-agnostic session control):** `src/control.c` parses `START <json>` / `STOP` / `STATUS` commands using Zephyr's JSON library against a schema mirroring `struct gosteady_prewalk`. All 7 controlled-vocab fields are string-validated against the v1 vocabulary; free-form strings are truncated-copied. The parser writes its response into a caller-provided buffer — transport-agnostic by design, so the M6b BLE bridge can tunnel the same commands from a NUS write without the nRF9151 firmware caring. Wired into `src/dump.c` as an additional dispatch target, so the existing uart1 channel now carries both file ops and session control. `tools/control.py` drives it from the host (supports named presets like `concrete-normal-20` so the operator doesn't hand-type JSON 30 times). End-to-end test: a preset-driven `start → sample → stop → pull` cycle produced a session file whose `course_id`, `intended_distance_ft`, and `operator_id` came through exactly as sent (and the other 9 fields all validate against the canonical vocabulary). The M4 button handler is still wired up as a fallback for bench work while the cap is open. Rate held at ~100 Hz through the JSON path.
 - **M6b (BLE control over NUS):** `bridge_fw/` is a vendored fork of Nordic's `applications/connectivity_bridge` with four surgical edits (see `bridge_fw/PATCHES.md`) that retarget the Nordic UART Service from uart0 to uart1 — the latter being where our M5/M6a command parser listens. The nRF5340 net core gets built as `ipc_radio` automatically via sysbuild and programmed alongside the app image. BLE is compiled in upstream but **gated off at runtime by default**; the operator enables it by editing `BLE_ENABLED=0` → `1` in `Config.txt` on the bridge's USB mass-storage endpoint and ejecting. `bridge_fw/boards/thingy91x_nrf5340_cpuapp.overlay` pins the bridge's uart1 default to 1 Mbaud so the BLE path's `baudrate=0` ("don't change") peer-conn event doesn't leave a 115200/1Mbaud mismatch against the nRF9151. **Operator-facing UI:** `tools/capture.html` is a single-file Web Bluetooth page with a preset button per row of the v1 30-run capture matrix and a persistent STOP button. As of 2026-04-23 we drive it from **Chrome on the Mac** (not Bluefy on iOS — Bluefy's App Store build doesn't opt into `WKWebView.isInspectable` so Safari Web Inspector can't attach, blocking debug; Chrome gives us full DevTools + Claude-in-Chrome extension integration for end-to-end debugging).
 - **M7 (POST-WALK capture loop):** `capture.html` gained a post-STOP modal that fires on every `OK samples=N` notification with three fast-path actions — **✓ Good** (writes `valid=Y` with defaults), **✗ Discard** (writes `valid=N` + `discard_reason` dropdown), and **📝 Notes** (full 7-field form covering the POST-WALK annotation schema). Entries are keyed by `session_uuid` in `localStorage` under `gosteady_post_walk_notes_v1`; an **Export capture notes (JSON)** button downloads a schema-v1 sidecar to `~/Downloads`. On the firmware side, `control.c::cmd_start` now echoes the UUID in its response (`OK started <uuid>`) via a new `gosteady_session_get_uuid_str()` public API in `src/session.h`, so the browser can correlate its notes to the same primary key the session file header carries. `tools/ingest_capture.py` joins pulled `.dat` headers with the notes JSON and emits a CSV matching the `Captures` sheet of `GoSteady_Capture_Annotations_v1.xlsx` column-for-column (13 FIRMWARE + 12 PRE-WALK + 7 POST-WALK + 2 DERIVED), plus two trailing diagnostic columns (`run_idx`, `post_walk_status`) the operator drops before spreadsheet append. End-to-end validation: a 10-run shakedown across the Indoor Polished Concrete segment produced 10/10 clean session files (100.00 Hz, mono=✓, flash_errors=0, UUID-match) and 10/10 POST-WALK notes that joined cleanly at ingest. Stationary baseline (run 9) showed |a|=1.01g / |ω|=0°/s across 37 s of captured data; stumble run (run 10) showed a textbook 4.76g impulse at the event moment — IMU signal quality is solid at the hardware level.
+- **M9 Phase 1–3 (Python distance estimator, 2026-04-24):** M8 was paused at 10/30 runs to develop the algorithm pipeline end-to-end first. The `algo/` package implements a streaming-first step-based distance estimator — **streaming DF-II-T biquad filters** (matching CMSIS-DSP's `arm_biquad_cascade_df2T_f32`) for 0.2 Hz HP gravity removal and 5 Hz LP peak shaping → **Schmitt-trigger peak FSM** with per-peak feature extraction (amplitude / duration / energy) → **per-run distance regression** against `actual_distance_ft`. A parallel **500 ms running-σ motion gate** with hysteresis produces `motion_duration_s` (the new `active_minutes` product metric) and passes the stationary robustness gate. **V1 algorithm** (locked in after A/B): single-feature (amplitude) stride regression with loose Schmitt thresholds (0.02 g enter / 0.005 g exit / 0.5 s min-gap). **LOO performance: 16.4% MAPE / 3.45 ft MAE / 34% worst-case / both robustness gates PASS.** Key finding: the two-wheel/glide gait produces a compound 2:1 impulse structure (loose detector finds ≈2× the operator-perceived step count — one for wheel glide, one for rear-leg plant), but the stride regression adapts naturally to whatever detector density is consistent. Energy-based alternatives (integrated |a|² over motion windows) underperformed at 28–45% MAPE because energy scales with speed² while distance scales with speed — a fundamental physics mismatch on this walker type. Multi-feature regression overfit on 8 training runs (cond(X)≈200). Both will be re-evaluated at 30 runs. See `algo/README.md` and `algo/run_path_comparison.py` for the full A/B harness.
 
 The repo is public on GitHub at `https://github.com/Jabl1629/gosteady-firmware` and also serves the operator UI via GitHub Pages at **`https://jabl1629.github.io/gosteady-firmware/tools/capture.html`** (auto-rebuilds on every push to `main`).
 
@@ -200,6 +201,24 @@ gosteady-firmware/
 │   ├── cleanup_device.py             # Wipe /lfs/sessions before a fresh capture
 │   ├── ingest_capture.py             # Join .dat headers + POST-WALK notes JSON → spreadsheet CSV
 │   └── read_session.py               # Parse .dat file, validate against v1 vocabulary
+├── algo/                             # ** M9 Python distance estimator + eval harness **
+│   ├── data_loader.py                # Parse raw_sessions/<date>/ into per-run objects
+│   ├── evaluator.py                  # LOO harness + metrics + robustness gates
+│   ├── filters.py                    # Streaming DF-II-T biquads (mirrors CMSIS-DSP layout)
+│   ├── motion_gate.py                # Running-σ motion gate with Schmitt hysteresis
+│   ├── step_detector.py              # Schmitt peak FSM + per-peak feature extraction
+│   ├── stride_model.py               # Per-run aggregate regression (peaks → distance)
+│   ├── distance_estimator.py         # Orchestrator implementing Predictor interface (V1 defaults)
+│   ├── energy_estimator.py           # Path B alternative (integrated energy; lost A/B, kept as diag)
+│   ├── characterization.py           # Phase 2 plots + PSD + noise-floor numbers
+│   ├── diagnose_steps.py             # Strict-vs-loose detector comparison + autocorrelation
+│   ├── run_phase3.py                 # Single-config LOO report
+│   ├── run_path_comparison.py        # 5-way A/B: peaks (strict+loose) vs energy (E, E+T, T)
+│   ├── figures/                      # Generated plots (gitignored)
+│   ├── venv/                         # Self-contained Python 3.14 env (gitignored)
+│   ├── requirements.txt              # Loose pins
+│   ├── requirements.lock.txt         # Frozen versions for reproducibility
+│   └── README.md
 ├── raw_sessions/                     # Per-capture-date archive (gitignored). Layout:
 │   └── YYYY-MM-DD/                   #   <uuid>.dat × N, notes JSON, capture_<date>.csv
 ├── data collection and protocols/    # v1 capture protocol + annotation spreadsheet
@@ -230,9 +249,9 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
 5. **USB dump** — mass storage / CDC-ACM path for host-side extraction. *(done 2026-04-19)*
 6. **BLE control** — start/stop session commands over GATT (NUS). *(done 2026-04-21; M6a = parser, M6b = bridge fork + Web BLE page. Further hardened 2026-04-22 with `sendCommand` chunking to ≤180 B to survive NUS → uart1 reassembly limits.)*
 7. **Python CLI** — host tool for session control and data dump. *(done 2026-04-23 — superseded by the M3 popup + `tools/ingest_capture.py` + `tools/cleanup_device.py` combination. `control.py` remains as the bench-open-cap fallback. No unified CLI needed; the operator workflow is fully browser-driven now.)*
-8. **Dataset collection** — run the capture protocol end-to-end. *(← next — 10/30 runs done as shakedown 2026-04-23 with all quality gates passing; runs 11-30 remaining.)*
-9. **Python algorithm** — distance estimator trained on the dataset.
-10. **C port** — move the estimator on-device.
+8. **Dataset collection** — run the capture protocol end-to-end. *(paused at 10/30 — shakedown done 2026-04-23 with all quality gates passing. Paused by decision to build M9 framework first against the 10-run set, then resume for runs 11–30 feeding the locked-in pipeline.)*
+9. **Python algorithm** — distance estimator trained on the dataset. *(Phase 1–3 done 2026-04-24 on 10-run set: streaming filter + motion gate + Schmitt peak FSM + single-feature stride regression → 16.4% MAPE LOO, both robustness gates pass. Final fit deferred to 30-run completion.)*
+10. **C port** — move the estimator on-device. *(← next — all algo blocks are streaming-shaped; translation is mechanical.)*
 11. **Validation** — hold-out error characterization.
 12. **Cellular** — LTE-M / NB-IoT link up on nRF9151.
 13. **Cloud backend** — session telemetry upload.
@@ -243,25 +262,59 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
 
 ## Algorithm: Distance Estimation
 
-### Current State (Python, validated offline)
+### Current State (V1 Python, streaming-shaped, LOO-validated on 10-run shakedown)
 
-A step-based distance estimator developed in Python using data from a prior prototype. Code lives in `GoSteady/null_old_fw/`.
+The v1 algorithm lives in `algo/` in this repo. It's a rebuild from scratch of the step-based family the prior work validated, but (a) streaming-first so the M10 C port is mechanical, (b) tuned against the current BMI270 / two-wheel / glide-cap hardware rather than the prior standard-walker / tacky-cap hardware, and (c) built with a motion-gate block that also emits the `active_minutes` product metric.
 
-**Pipeline:**
+**Pipeline (all blocks streaming, O(1) state, ~200 B total on-device footprint):**
+
 ```
-IMU data → gravity removal (Butterworth LP 0.5 Hz) → accel magnitude → peak detection → stride regression from peak accel → distance (ft)
+IMU (100 Hz)  →  |a| (m/s²)  ÷ g  →  |a|_g  →  HP 0.2 Hz  →  |a|_HP
+                                                                 │
+                                                                 ├─▶ LP 5 Hz  ─▶  Schmitt peak FSM ─▶ {amp, dur, energy}
+                                                                 │                                          │
+                                                                 │                                          ▼
+                                                                 │                                  Σ per-run → stride regression → distance_ft
+                                                                 │
+                                                                 └─▶ 500 ms running σ  ─▶  motion gate (hysteresis)
+                                                                                                           │
+                                                                                                           ▼
+                                                                                                    Σ motion duration → active_minutes
 ```
 
-**Performance (9 calibration runs, polished concrete):**
-- Step detection MAE: 0.67 steps
-- Distance MAPE: 12.4%
-- Distance MAE: 1.21 ft
-- All runs within 25% error
+**V1 locked-in parameters (see `algo/distance_estimator.py` defaults):**
 
-**Calibrated parameters:**
-- Step detection prominence: 0.15 g
-- Step detection min distance: 70 samples (~0.7s at 99.3 Hz)
-- Stride regression: `stride_ft = 1.257 × peak_accel_g − 1.052` (R² = 0.84)
+| block | param | value | rationale |
+|---|---|---|---|
+| HP filter | Butterworth, order 2, cutoff | 0.2 Hz | Well below 0.37 Hz min observed gait cadence; ≥60 dB DC attenuation |
+| LP filter | Butterworth, order 2, cutoff | 5 Hz | Preserves ~100 ms impulse width; kills high-freq sensor noise |
+| Peak detector | Schmitt enter / exit / min-gap | 0.02 g / 0.005 g / 0.5 s | "Loose" thresholds — captures the compound 2:1 impulse structure consistently; passes the 1 ft stationary robustness gate |
+| Motion gate | window / enter σ / exit σ / exit hold | 500 ms / 0.01 g / 0.005 g / 2 s | Enter threshold is 11× stationary σ; hysteresis prevents chatter |
+| Stride regression | features (per peak) | `amplitude_g` only | Multi-feature overfit on 8 training runs; single-feature wins at n=8, revisit at n=30 |
+| Stride regression | fit | ridge OLS on per-run `(n_peaks, Σ amp) → actual_distance_ft` | Target is per-run total, not per-step stride — all 8 walks train, no dependence on `manual_step_count` gaps |
+| Stride formula (final fit on 10 runs) | | `stride_ft = 0.217 + 2.757 · amp_g` | Compare prior work: `1.257 · amp_g − 1.052` (different walker/cap/hardware — not directly comparable) |
+
+**Performance (LOO, 8 walk runs, 2026-04-23 Indoor Polished Concrete set):**
+
+- **Distance MAPE: 16.4%**, MAE 3.45 ft, RMSE 4.18 ft, worst-run 34.4%
+- Both robustness gates **PASS**: stationary predicted 0.79 ft (limit 1.0), stumble predicted 29.33 ft (limit 60.0, 3× actual)
+- Training R² = 0.885, design-matrix cond # = 9.5
+- Per-run motion fractions 82–97% for walks, 17% for stationary baseline
+
+These numbers are *framework-shakedown* quality, not final — the 10-run sample is small and all on one surface. Final fit + error characterization comes at 30 runs.
+
+**Compare-and-contrast against the prior work that got 12.4% MAPE:**
+
+Same algorithm *family* (peak detection + amplitude-linear stride regression). Different hardware (BMI270 vs. unknown IMU), walker type (two-wheel vs. standard), cap type (glide vs. tacky), and surfaces. The 16.4% vs 12.4% gap is not meaningful as an apples-to-apples comparison. The prior work is the proof-of-concept that the family works; our rebuild is the streaming-production-shaped version with the current hardware's coefficients.
+
+### Key Phase 2–3 findings (verified against data)
+
+- **Stationary noise floor is exceptional.** σ of |a|_HP during run 9 is **0.0009 g** (1 mg). Walking σ is 0.307 g (median) — a **350× SNR** separation. Any sensible step detector separates motion from rest trivially.
+- **Dominant walk energy sits 0.3–3 Hz**, walking PSDs are 10⁻³–10⁻² g²/Hz, stationary PSD is 10⁻⁸ g²/Hz — **5–6 orders of magnitude** separation.
+- **The gait is rhythmic, not smooth glide.** Autocorrelation of |a|_HP_LP shows clean side-lobes at 1.5–2 s lag (matching 0.4–0.7 Hz manual cadence). Not a gliding signal — discrete rhythm.
+- **Compound 2:1 impulse structure per operator-step.** A loose detector (prominence 0.01 g) finds exactly **2× the manual step count** on runs 1 and 2, ~1.5–2× on the rest. Physically this matches a two-wheel walker cycle: one impulse as wheels roll forward, one as rear legs plant. The operator counts "one step" per cycle; the accelerometer sees two.
+- **Cadence is tightly bounded (0.37–0.65 Hz manual), speed comes from stride length.** "Fast" walks don't have higher cadence — they have longer strides with bigger peak-amplitude impulses. This validates the peak-amp → stride regression premise.
+- **Energy-based distance is the wrong primitive for this walker.** E ∝ speed² while distance ∝ speed, so "energy per foot" varies 10× across the speed range on identical-distance walks. Energy regression alone hit 44% MAPE; E+T made it 28%; neither beat peaks. The physics of the glide cap — impulse amplitude *scales* with speed rather than being speed-invariant — means step-based primitives naturally absorb the speed dependency.
 
 ### Why Step-Based, Not Dead Reckoning?
 
@@ -409,48 +462,21 @@ Run after completing all 10 runs on a surface, always before closing out the ses
 
 ---
 
-## Existing Algorithm Codebase (Python)
+## Prior-prototype algorithm reference
 
-Located at `GoSteady/null_old_fw/`:
+A Python codebase from the prior standard-walker / tacky-cap prototype lives at `GoSteady/null_old_fw/` (parent folder, not in this repo). Pipeline was the same family as our V1 — Butterworth gravity removal → |a| magnitude → peak detection → single-feature (peak amp) stride regression → distance. Achieved **12.4% MAPE on 9 calibration runs** with `stride_ft = 1.257 · peak_accel_g − 1.052` and prominence 0.15 g / min-distance 70 samples. This is the *proof of concept* that the step-based family works for the product. The `algo/` directory in this repo is the streaming-production-shaped rebuild against current hardware / walker type / cap type — see the Algorithm: Distance Estimation section above for what's actually deployed.
 
-```
-null_old_fw/
-├── src/
-│   ├── data_loader.py           # Parse .dat files and Run Annotations.xlsx
-│   ├── preprocessing.py         # Butterworth filtering, gravity removal, magnitude
-│   ├── step_detection.py        # Accel peak detection, gyro threshold, step metrics
-│   ├── distance_estimation.py   # Accel regression, per-speed stride, fixed stride, dead reckoning
-│   └── visualization.py         # IMU plots, step overlays, comparison charts
-├── notebooks/
-│   ├── 01_data_exploration.ipynb
-│   ├── 02_preprocessing.ipynb
-│   ├── 03_step_detection.ipynb
-│   ├── 04_distance_estimation.ipynb
-│   └── 05_validation_summary.ipynb
-├── testdata/
-│   ├── data000.dat – data011.dat    # 12 IMU recordings (7-col TSV)
-│   └── Run Annotations.xlsx
-└── requirements.txt
-```
-
-**Sensor data format (.dat files):** Tab-separated, 7 columns, no header, CRLF line endings:
-```
-timestamp_ms  accel_x_g  accel_y_g  accel_z_g  gyro_x_dps  gyro_y_dps  gyro_z_dps
-```
-
-- Accelerometer: units in g, Y-axis carries gravity (~0.96g at rest)
-- Gyroscope: units in deg/s, quantized at 0.0625 dps steps
-- Sample rate: 99.3 Hz (10.07 ms ± 0.29 ms intervals)
+The prior `.dat` format (tab-separated, 7 columns, 99.3 Hz) is *not* what our firmware produces — our session files are 256 B packed header + 28 B packed binary records @ 100 Hz. No cross-compatibility; `tools/read_session.py` + `algo/data_loader.py` are the canonical parsers.
 
 ---
 
 ## Immediate Next Steps
 
-Milestones 1–7 are done and the 10-run shakedown (runs 1-10, Indoor Polished Concrete) passed every quality gate on 2026-04-23. Picking up:
+Two parallel tracks as of 2026-04-24. M9 Phase 1–3 is done against the 10-run shakedown; the algorithm pipeline is locked in and ready to absorb more data.
 
-### 1. Complete the remaining 20 runs
+### Track A — resume M8 (runs 11–30)
 
-**Outdoor concrete sidewalk (runs 11–20)** and **indoor low-pile carpet (runs 21–30)** per the run matrix in "Data Collection Plan". The shakedown validated the full pipeline end-to-end, so these are "just execute the protocol" — no tooling changes expected.
+10/30 runs done as shakedown 2026-04-23. Picking up **outdoor concrete sidewalk (runs 11–20)** and **indoor low-pile carpet (runs 21–30)**. Pipeline is fully validated; this is "just execute the protocol."
 
 **Capture-time command sequence** (paste into a shell on capture day):
 
@@ -474,17 +500,38 @@ $PY tools/ingest_capture.py \
     --sessions raw_sessions/$STAMP/ \
     --notes    raw_sessions/$STAMP/gosteady_capture_notes_$STAMP.json \
     --out      raw_sessions/$STAMP/capture_$STAMP.csv
+
+# Re-run LOO against the cumulative dataset whenever new runs land:
+algo/venv/bin/python3 -m algo.run_path_comparison
 ```
 
-### 2. One open logistics question before outdoor runs
+**Open logistics question before outdoor runs:** BLE range for the outdoor 40-ft Run 16. Mac internal antenna range to the Thingy:91 X is typically fine indoors but near the edge at 40 ft outdoors. Three options in decreasing invasiveness: (a) Mac sits at course midpoint; (b) accept mid-run disconnects (firmware keeps sampling regardless — the browser just loses control until reconnect); (c) range-test Run 11 (warmup, 10 ft) before committing to the full outdoor set. Easiest is (c): if Run 11 pairs and round-trips cleanly, treat (a) as the operator convention and proceed.
 
-**BLE range for the outdoor 40-ft Run 16.** Mac internal antenna range to the Thingy:91 X is typically fine indoors but near the edge at 40 ft outdoors. Three options in decreasing invasiveness: (a) Mac sits at course midpoint; (b) accept mid-run disconnects (firmware keeps sampling regardless — the browser just loses control until reconnect); (c) range-test Run 11 (warmup, 10 ft) before committing to the full outdoor set. Easiest is (c): if Run 11 pairs and round-trips cleanly, treat (a) as the operator convention and proceed.
+### Track B — M9 Phase 4 (only after 30 runs complete)
 
-### 3. After capture → dataset archive + M9
+With the pipeline locked, the 30-run re-fit and error characterization is straightforward. Things to check when data fills in:
 
-**Dataset deliverable:** each `raw_sessions/<date>/` becomes the v1 capture archive. Append the `capture_<date>.csv` rows (first 34 columns) to the `Captures` sheet of `GoSteady_Capture_Annotations_v1.xlsx`, commit the raw_sessions archive (currently gitignored — move it to a long-term storage location or publish as a Git LFS / release artifact).
+1. **Re-A/B single vs. multi-feature stride regression.** With 24–28 training folds vs. 8, the multi-feature model's collinearity risk drops. If cond(X) stays < 50 and LOO MAPE beats single-feature by ≥1 pt, promote to V1.
+2. **Per-surface regression.** Fit coefficients separately for polished_concrete / outdoor_concrete / low_pile_carpet. The surface classifier can come at v2 — for v1, once the data exists, check if a shared regression is within 1 pt of per-surface. If not, that tells us surface calibration is the v2 priority.
+3. **Worst-case characterization.** The current worst run (run 5, -33%) is small-sample noise-or-not. At 30 runs, worst-case becomes a real quantity for spec-setting.
+4. **Re-evaluate motion-gate thresholds** against runs 19 and 29 (the outdoor + carpet stationary baselines).
 
-**M9 (Python algorithm):** train/validate the step-based distance estimator from `GoSteady/null_old_fw/` on the fresh 30-run v1 dataset. Expected improvement over the 9-run calibration set: lower MAPE due to tacky→glide cap difference, tighter stride regression from the two-wheel walker's continuous glide signal.
+### Track C — M10 (C port) prep
+
+The algo/ package was designed for direct translation. Specifically:
+
+- `filters.py::BiquadSOS.step()` maps 1:1 to `arm_biquad_cascade_df2T_f32` (CMSIS-DSP).
+- `motion_gate.py::MotionGate.step()` is a ring buffer + two running sums + one hysteresis counter — trivially a C struct.
+- `step_detector.py::StepDetector.step()` is a two-state FSM with three accumulators — trivially a C struct.
+- `stride_model.py` fit is offline (Python); inference is K+1 MACs per peak using fixed coefficients from the final model.
+
+The M10 deliverable is:
+
+1. A generated C header (`src/algo/gosteady_algo_params.h`) emitted from Python after final fit.
+2. `src/algo/*.c` — one file per Python module, each a direct line-by-line translation.
+3. Reference vectors: feed a pulled `.dat` through Python `apply()`, capture filter/gate/peak outputs per sample, and use those as bit-close (float32) regression fixtures for the C port's unit tests.
+
+**M8 + M9 re-fit is a prerequisite for M10.** Don't generate fixed-coefficient C headers against a 10-run calibration that we know will shift.
 
 ---
 
@@ -524,9 +571,9 @@ All commands are newline-terminated. `\n` is a literal `0x0A` byte — no escape
 **Algorithm / sensing:**
 - **Step-based, not dead reckoning** — dead reckoning gives 73% MAPE with MEMS IMUs, unusable.
 - **Accelerometer magnitude** for step detection — orientation-independent (`sqrt(x² + y² + z²)`).
-- **Stride regression from peak acceleration** — no speed label needed, 12.4% MAPE.
+- **Stride regression from peak acceleration** — no speed label needed; prior work hit 12.4% MAPE on standard/tacky, our rebuild hits 16.4% MAPE on two-wheel/glide (10-run shakedown, to be re-fit at 30).
 - **No microphone** for surface detection — IMU high-frequency content has the friction signal, mic adds cost/power/board complexity.
-- **BMI270 is the session recorder; ADXL367 is the power switch** — the 7-column `.dat` format the Python algorithm expects requires accel + gyro, which only BMI270 provides. ADXL367 stays online as a sanity print in M2+ and will be used for wake-on-motion in the later power-optimization milestone.
+- **BMI270 is the session recorder; ADXL367 is the power switch** — the 7-column `.dat` format the prior Python algorithm expected requires accel + gyro, which only BMI270 provides. ADXL367 stays online as a sanity print in M2+ and will be used for wake-on-motion in the later power-optimization milestone.
 
 **Scope / platform:**
 - **v1 data collection is single-walker, single-cap, 3 surfaces** — complexity deferred to v2.
@@ -548,6 +595,16 @@ All commands are newline-terminated. `\n` is a literal `0x0A` byte — no escape
 - **POST-WALK captured in the browser at STOP time, NOT in the session file header (2026-04-23).** Considered expanding `struct gosteady_session_header` to include the 7 POST-WALK fields so sessions stay self-describing for POST-WALK too. Chose instead to keep POST-WALK in a separate JSON sidecar (`gosteady_capture_notes_<date>.json`) keyed by `session_uuid`, joined at ingest by `tools/ingest_capture.py`. Rationale: (a) POST-WALK is operator judgment, not device state — no reason the firmware needs to know; (b) editing POST-WALK after the fact is trivial in a JSON file, hard in a 256-byte packed binary header; (c) versioning the POST-WALK schema independently is safer; (d) the firmware's 256-byte header already has `_reserved[67]` for room-to-grow on FIRMWARE/PRE-WALK fields but we didn't want to burn that on POST-WALK. The join tool is responsible for reconciling the two sides.
 - **`session_uuid` echoed on `OK started <uuid>` as the join key.** Without this the browser has no way to correlate its POST-WALK entry to the specific `.dat` file on flash (the header UUID is known only to the 91 until LIST/DUMP at ingest). `gosteady_session_get_uuid_str()` in `src/session.h` is the public API. Backward-compatible: a bare `OK started` still parses on the browser side (UUID becomes null, POST-WALK still saves by position — but we'd lose the primary-key guarantee, so don't regress the echo).
 - **Post-STOP modal, not an inline form.** Alternatives considered: (a) full POST-WALK form always visible as a side panel; (b) per-row edit icon on completed rows. Went with (a)+(b) hybrid: modal on STOP forces an in-the-moment decision (`valid=Y/N` is the one field that's hard to reconstruct later), and the modal's three paths (Good / Discard / Notes) trade off friction for expressiveness. Tap-to-edit on completed rows deferred until it's actually needed — `capture.html` is currently write-once per run and that's been fine through the shakedown.
+
+**M9 architecture (2026-04-24):**
+
+- **Paused M8 at 10/30 runs to build the M9 framework first.** Normally you'd capture the full dataset then develop the algorithm against it. Chose instead to develop the pipeline end-to-end against the 10-run shakedown and let the remaining 20 runs feed a locked-in framework. Rationale: (a) the *architecture* decisions (step-based vs energy, single vs multi-feature, motion-gate design) need data to be made honestly, but 10 runs is plenty to make them; (b) the *parameter* decisions (filter coefficients, regression weights) scale well with data once the framework exists; (c) doing architecture-exploration *during* data collection would have caused scope creep at capture time — e.g., "I need more runs at speed X to disambiguate between hypothesis Y and Z." With the framework locked, the remaining captures are mechanical.
+- **Streaming-first Python, matching CMSIS-DSP semantics exactly.** Every DSP block (`filters.py::BiquadSOS`, `motion_gate.py::MotionGate`, `step_detector.py::StepDetector`) has a `.step(x)` method that processes one sample at a time with O(1) state, and a `.apply(arr)` method that's a trivial loop over `.step()`. Numerically bit-identical. `BiquadSOS` uses Direct Form II Transposed specifically because that's what `arm_biquad_cascade_df2T_f32` uses on the nRF9151 — the C port is a mechanical translation, not a re-derivation. Total on-device state across all blocks: ~200 bytes.
+- **Motion gate as a shared block, not a per-output gate.** The 500 ms running-σ gate serves three purposes simultaneously: (a) primary output for the `active_minutes` product metric; (b) distance-accumulation gate (rejects peaks during stationary periods — what passes the 1 ft stationary robustness gate); (c) future power gating on-device (skip full peak detection when parked). One block, three uses, one place to tune. Alternative considered: separate motion detectors for each use case — rejected for complexity without benefit.
+- **Per-run total distance as the regression target, not per-step stride.** Fit objective is Σ_peaks(c₀ + c·features) = actual_distance_ft per run. This trains on all 8 walk runs (including the s-curve where `manual_step_count` was missed) rather than only the 7 with step-count ground truth. Also matches what production inference actually has access to: the firmware will never have a manual step count. Alternative considered: fit against `actual_distance / manual_step_count` per-run → rejected because it throws away 1/8 of the training data and trains on a different objective than is deployed.
+- **Single-feature regression (amplitude only) locked in for v1, multi-feature deferred to 30-run retrain.** Multi-feature (amplitude + duration + energy) had train-R² 0.936 vs single-feature 0.885, but LOO MAPE was 23.6% vs 16.2% — classic small-sample overfit. Energy's fitted coefficient came out *negative* (nonsensical — energy physically correlates positively with stride), driven by collinearity with amplitude (cond(X) = 212 vs 9.4 single-feature). At 30 runs with 3× more DOF per coefficient and surface variation, multi-feature should stabilize. The A/B re-runs automatically whenever new data arrives via `algo/run_path_comparison.py`.
+- **Loose Schmitt thresholds (0.02 g enter / 0.005 g exit / 0.5 s min-gap) over strict (0.05 g / 0.01 g / 1.0 s), 2026-04-24.** Both hit essentially identical MAPE (16.4% vs 16.2%). Loose was picked because: (a) passes the stationary robustness gate (0.79 ft) while strict narrowly fails (1.28 ft); (b) the gait has a compound 2:1 accel-impulse-to-operator-step ratio — loose captures both impulses of each stride cycle consistently, strict catches only the larger one; (c) consistency of detector output vs distance matters more than "matching the operator's perception of what a step is." The regression adapts to whatever the detector produces, as long as it's consistent.
+- **Energy-based distance abandoned as the primitive, kept as a diagnostic.** Integrated `∫ |a|² dt` over motion windows hit 44% MAPE alone and 28% with motion-duration as a second feature. Root cause is physics: peak amplitude scales with speed (longer strides at faster walks), so energy scales with speed² while distance scales with speed — E/distance varies 10× across the speed range, which a linear regression can't untangle with 8 training samples. `energy_estimator.py` is kept in the tree as a per-run diagnostic output so we can watch E-vs-distance as the 30-run dataset fills in — if the surface or walker changes make the scaling more linear (unlikely but possible), reconsider.
 
 **Runtime gates we know about:**
 - `BLE_ENABLED=1` in `Config.txt` on `/Volumes/NO NAME` — gets wiped by `west flash --recover`, needs re-toggle after.
