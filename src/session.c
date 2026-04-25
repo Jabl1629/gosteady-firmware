@@ -320,6 +320,20 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 {
 	if (!s_active) { return -ENODEV; }
 
+	/* Clear s_active FIRST so the sampler stops enqueueing immediately
+	 * and the writer's per-sample s_active guard discards anything that
+	 * was already in flight in the msgq. This closes the race that
+	 * otherwise lets a batch fill up between the writer's fs_close and
+	 * this function setting s_active=false, which produced the
+	 * `writer fs_write -9/1792` (-EBADF) errors and — in the worst case
+	 * — landed inside a use-after-free path in LittleFS as a HardFault
+	 * on STOP. Mirrors session_start which sets s_active=true only
+	 * AFTER the file is open + handshake acked; this sets it false
+	 * BEFORE the close path runs. k_poll_signal_raise has the memory
+	 * barriers needed for the writer to observe the flag change before
+	 * processing the stop event. */
+	s_active = false;
+
 	/* Signal the writer to finish draining, rewrite the header, and
 	 * close. Wait for the ack — after this returns, the file is safe. */
 	k_poll_signal_raise(&stop_signal, 0);
@@ -328,8 +342,6 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 		LOG_ERR("writer stop ack timeout (%d)", ret);
 		/* Best-effort cleanup */
 	}
-
-	s_active = false;
 
 	char uuid_str[37];
 	uuid_to_string(s_header.session_uuid, uuid_str);
