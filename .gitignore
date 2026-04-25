@@ -50,6 +50,11 @@ nordic resources/
 # artifacts, keyed by UUID — no value checking them into the repo.
 sessions/
 
+# uart0 console logs from tools/log_console.py. Local diagnostic data,
+# rotated daily by date. Keep out of git — they're large, full of noise,
+# and easy to regenerate by re-running the logger.
+logs/
+
 # Canonical capture-archive location (GOSTEADY_CONTEXT.md "Post-Session
 # Ingest" step 2). Dated subdirectories hold the raw .dat files plus
 # the POST-WALK notes sidecar and any per-run log rotations. Bulk

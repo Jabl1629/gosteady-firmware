@@ -328,6 +328,8 @@
 <footer>
   <button id="stop-btn" disabled>STOP</button>
   <button id="log-toggle">Log</button>
+  <button id="log-export">Export Log</button>
+  <button id="log-clear">Clear Log</button>
 </footer>
 
 <script>
@@ -430,16 +432,150 @@
   const resetBtn = $('reset-btn');
 
   // ---- Logging ------------------------------------------------------
+  //
+  // Three-tier persistence so a refresh / crash / browser eviction
+  // doesn't lose diagnostic context:
+  //
+  //   (1) DOM       — last 80 entries shown in the Log panel.
+  //   (2) localStorage — full buffer (capped at LOG_MAX_ENTRIES) under
+  //                      LOG_LS_KEY. Restored on page load. Survives
+  //                      ordinary navigation + reload.
+  //   (3) Disk      — auto-downloaded on FATAL pattern in any rx line,
+  //                   and via the manual Export Log button. Lands in
+  //                   ~/Downloads as gosteady_capture_log_<stamp>.log.
+  //                   Recommended: move into raw_sessions/<date>/ at end
+  //                   of capture day, alongside the .dat files.
+  //
+  // Even if localStorage gets wiped (incognito, site-data clear, browser
+  // sandbox eviction), tier (3) gives a disk copy of any session that
+  // ended in a fault.
+
+  const LOG_LS_KEY = 'gosteady_capture_log_v1';
+  const LOG_MAX_ENTRIES = 10000;
+  let logEntries = [];
+  let logSaveTimer = null;
+  let lastAutoExportEpoch = 0;
 
   function log(kind, text) {
-    const t = new Date().toTimeString().slice(0, 8);
+    const now = new Date();
+    const t = now.toTimeString().slice(0, 8);
+    const ts = now.toISOString();
+
+    // (1) DOM render — same look as before.
     const span = document.createElement('span');
     span.className = kind;
     span.textContent = `[${t}] ${text}\n`;
     logEl.appendChild(span);
     logEl.scrollTop = logEl.scrollHeight;
     while (logEl.children.length > 80) logEl.removeChild(logEl.firstChild);
+
+    // (2) Persistent buffer.
+    logEntries.push({ ts, t, kind, text });
+    if (logEntries.length > LOG_MAX_ENTRIES) {
+      logEntries.splice(0, logEntries.length - LOG_MAX_ENTRIES);
+    }
+    // Debounce localStorage writes — bursts of log lines (e.g. on
+    // connect or a flurry of STATUS responses) shouldn't each pay the
+    // serialization cost. 250 ms is short enough that nothing important
+    // is lost on a sudden tab close.
+    if (logSaveTimer === null) {
+      logSaveTimer = setTimeout(() => {
+        logSaveTimer = null;
+        try {
+          localStorage.setItem(LOG_LS_KEY, JSON.stringify(logEntries));
+        } catch (e) {
+          // Quota exceeded → halve the buffer and retry once.
+          logEntries.splice(0, Math.floor(logEntries.length / 2));
+          try { localStorage.setItem(LOG_LS_KEY, JSON.stringify(logEntries)); }
+          catch (_) { /* give up — disk export still has copies */ }
+        }
+      }, 250);
+    }
+
+    // (3) Auto-download on FATAL/HardFault. Rate-limit to once per 30 s
+    // so an unstoppable fault loop doesn't spam ~/Downloads.
+    if (/FATAL|HardFault|BUS FAULT|MEM MANAGE/i.test(text)) {
+      const now = Date.now();
+      if (now - lastAutoExportEpoch > 30_000) {
+        lastAutoExportEpoch = now;
+        // Flush localStorage immediately so the export reflects this entry.
+        if (logSaveTimer) { clearTimeout(logSaveTimer); logSaveTimer = null; }
+        try { localStorage.setItem(LOG_LS_KEY, JSON.stringify(logEntries)); }
+        catch (_) {}
+        exportLog('fault');
+      }
+    }
   }
+
+  function loadLog() {
+    try {
+      const raw = localStorage.getItem(LOG_LS_KEY);
+      if (!raw) return;
+      const restored = JSON.parse(raw);
+      if (!Array.isArray(restored) || restored.length === 0) return;
+      logEntries = restored;
+      // Re-render the most recent 80 to DOM. Older entries stay only in
+      // the persistent buffer (visible via Export Log).
+      const recent = logEntries.slice(-80);
+      for (const e of recent) {
+        const span = document.createElement('span');
+        span.className = e.kind || 'sys';
+        span.textContent = `[${e.t}] ${e.text}\n`;
+        logEl.appendChild(span);
+      }
+      logEl.scrollTop = logEl.scrollHeight;
+      // Use console.log here, not the persistent log(), to avoid
+      // recursion + to keep the restore note out of the saved buffer.
+      console.log(`gosteady: restored ${logEntries.length} log entries from localStorage`);
+    } catch (e) {
+      console.warn('log restore failed:', e);
+    }
+  }
+
+  function exportLog(reason) {
+    if (logEntries.length === 0) {
+      log('sys', 'no log entries to export');
+      return;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const suffix = reason ? `_${reason}` : '';
+    const filename = `gosteady_capture_log_${stamp}${suffix}.log`;
+    const lines = logEntries.map(e =>
+      `${e.ts} [${(e.kind || 'sys').toUpperCase().padEnd(3, ' ')}] ${e.text}`
+    );
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    log('sys', `exported ${logEntries.length} log entries → ${filename}`
+        + (reason ? ` (auto, reason=${reason})` : ''));
+  }
+
+  function clearLog() {
+    if (!confirm(`Clear all ${logEntries.length} stored log entries? `
+                 + 'This wipes both the in-page log and localStorage. '
+                 + 'Disk-exported copies are unaffected.')) return;
+    logEntries = [];
+    localStorage.removeItem(LOG_LS_KEY);
+    while (logEl.firstChild) logEl.removeChild(logEl.firstChild);
+    log('sys', 'log cleared');
+  }
+
+  // Best-effort flush on tab close. Synchronous localStorage write has
+  // to be inside a beforeunload handler — async download attempts are
+  // killed by the browser at this point.
+  window.addEventListener('beforeunload', () => {
+    if (logSaveTimer) {
+      clearTimeout(logSaveTimer);
+      try { localStorage.setItem(LOG_LS_KEY, JSON.stringify(logEntries)); }
+      catch (_) {}
+    }
+  });
 
   logToggle.addEventListener('click', () => logEl.classList.toggle('open'));
 
@@ -937,11 +1073,20 @@
     connBtn.textContent = 'Unsupported';
   }
 
+  loadLog();           // restore persistent log buffer FIRST so any
+                       // restoration messages from below are appended to
+                       // existing history rather than starting fresh
   loadCompletions();
   loadPostWalkNotes();
   renderMatrix();
   updateCounters();
-  log('sys', 'ready — tap Connect to pair with the Thingy:91 X UART.');
+
+  // Wire the new log-management buttons.
+  $('log-export').addEventListener('click', () => exportLog());
+  $('log-clear').addEventListener('click', clearLog);
+
+  log('sys', `ready — tap Connect to pair with the Thingy:91 X UART. `
+            + `${logEntries.length} prior log entries persisted.`);
 
   // Periodic status poll so the UI tracks the firmware state even if
   // buttons are pressed elsewhere (e.g., SW0 on the bench).
