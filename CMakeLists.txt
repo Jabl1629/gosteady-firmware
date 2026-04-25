@@ -8,4 +8,10 @@ target_sources(app PRIVATE
   src/session.c
   src/dump.c
   src/control.c
+  src/algo/gs_filters.c
+  src/algo/gs_motion_gate.c
+  src/algo/gs_step_detector.c
+  src/algo/gs_roughness.c
+  src/algo/gs_pipeline.c
 )
+target_include_directories(app PRIVATE src)

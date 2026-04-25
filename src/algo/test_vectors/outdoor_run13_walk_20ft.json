@@ -1,0 +1,55 @@
+{
+  "magic": "GS_REFVT",
+  "version": 1,
+  "name": "outdoor_run13_walk_20ft",
+  "note": "Outdoor concrete sidewalk, run 13, normal speed, 20 ft straight. Cross-surface vector \u2014 passes through the outdoor surface classifier branch.",
+  "source_dat": "raw_sessions/2026-04-25/b1e7ef3b-e7fd-4afc-9567-9fe5e9a14740.dat",
+  "session_uuid": "b1e7ef3b-e7fd-4afc-9567-9fe5e9a14740",
+  "annotations_subset": {
+    "course_id": "sidewalk_straight",
+    "intended_distance_ft": "20",
+    "actual_distance_ft": "20",
+    "intended_speed": "normal",
+    "direction": "straight",
+    "run_type": "normal",
+    "surface": "outdoor_concrete"
+  },
+  "n_samples": 3046,
+  "n_peaks": 19,
+  "fs_hz": 100.00328418010443,
+  "surface_class": 1,
+  "surface_name": "outdoor",
+  "session_outputs": {
+    "step_count": 19,
+    "motion_duration_s": 18.839381280788178,
+    "motion_fraction": 0.618516086671044,
+    "total_duration_s": 30.458999671592778,
+    "roughness_R": 0.33543566729568086,
+    "distance_ft": 17.43511273473285
+  },
+  "coeffs_in_use": {
+    "indoor": [
+      0.2270902338364803,
+      2.8042846877379506
+    ],
+    "outdoor": [
+      -0.07434298963522212,
+      1.8200373857921033
+    ],
+    "selected_surface": "outdoor"
+  },
+  "binary_layout": {
+    "header_bytes": 48,
+    "samples_block_offset": 48,
+    "mag_g_offset": 48,
+    "mag_hp_offset": 12232,
+    "mag_lp_offset": 24416,
+    "motion_mask_offset": 36600,
+    "peaks_offset": 39648,
+    "peak_record_bytes": 20,
+    "total_bytes": 40028
+  },
+  "algo_version": "0.6.0-algo-v1",
+  "algo_params_git_sha": "8008c5021cfa (dirty)",
+  "generated_utc": "2026-04-25T22:54:52+00:00"
+}

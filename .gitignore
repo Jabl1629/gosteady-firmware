@@ -19,6 +19,11 @@ cmake_install.cmake
 *.elf
 *.map
 
+# M10 reference vectors are NOT compiled artifacts — they're checked-in
+# regression fixtures emitted by algo/export_reference_vectors.py. Keep
+# them in git so the C-port unit tests have a stable input set.
+!src/algo/test_vectors/*.bin
+
 # Editor / IDE
 .vscode/*
 !.vscode/settings.json.example

@@ -1,0 +1,55 @@
+{
+  "magic": "GS_REFVT",
+  "version": 1,
+  "name": "indoor_run05_walk_20ft",
+  "note": "Indoor polished concrete, run 5, normal speed, 20 ft straight. Canonical walk vector \u2014 passes through the indoor surface classifier branch.",
+  "source_dat": "raw_sessions/2026-04-23/0778cb85-177d-4e82-94cc-62a8cffb6be2.dat",
+  "session_uuid": "0778cb85-177d-4e82-94cc-62a8cffb6be2",
+  "annotations_subset": {
+    "course_id": "concrete_A_straight",
+    "intended_distance_ft": "20",
+    "actual_distance_ft": "20",
+    "intended_speed": "normal",
+    "direction": "straight",
+    "run_type": "normal",
+    "surface": "polished_concrete"
+  },
+  "n_samples": 2218,
+  "n_peaks": 13,
+  "fs_hz": 99.99999999999999,
+  "surface_class": 0,
+  "surface_name": "indoor",
+  "session_outputs": {
+    "step_count": 13,
+    "motion_duration_s": 14.740000000000002,
+    "motion_fraction": 0.6645626690712354,
+    "total_duration_s": 22.180000000000003,
+    "roughness_R": 0.1786314242708216,
+    "distance_ft": 14.972259039483657
+  },
+  "coeffs_in_use": {
+    "indoor": [
+      0.2270902338364803,
+      2.8042846877379506
+    ],
+    "outdoor": [
+      -0.07434298963522212,
+      1.8200373857921033
+    ],
+    "selected_surface": "indoor"
+  },
+  "binary_layout": {
+    "header_bytes": 48,
+    "samples_block_offset": 48,
+    "mag_g_offset": 48,
+    "mag_hp_offset": 8920,
+    "mag_lp_offset": 17792,
+    "motion_mask_offset": 26664,
+    "peaks_offset": 28884,
+    "peak_record_bytes": 20,
+    "total_bytes": 29144
+  },
+  "algo_version": "0.6.0-algo-v1",
+  "algo_params_git_sha": "8008c5021cfa (dirty)",
+  "generated_utc": "2026-04-25T22:54:52+00:00"
+}

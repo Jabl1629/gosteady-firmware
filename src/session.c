@@ -30,16 +30,24 @@
 
 #include "session.h"
 
+#include "algo/gs_pipeline.h"
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/entropy.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/base64.h>
+#include <math.h>
 #include <string.h>
 #include <stdio.h>
 
 LOG_MODULE_REGISTER(gs_session, LOG_LEVEL_INF);
+
+/* Inverse of g (m/s²) — converts BMI270 m/s² readings to g for the
+ * V1 algorithm pipeline (mag_g input). 9.80665 is the CODATA standard
+ * value used by both algo/data_loader.py and src/algo/gs_pipeline.h. */
+#define INV_G_MS2  (1.0f / 9.80665f)
 
 #define SESSION_DIR         "/lfs/sessions"
 #define SAMPLE_QUEUE_DEPTH  256   /* ~2.56 s of headroom at 100 Hz */
@@ -64,6 +72,15 @@ static struct gosteady_session_header s_header;
 static uint32_t          s_session_start_uptime_ms;
 static uint32_t          s_sample_count;
 static uint16_t          s_dropped_samples;
+
+/* M10 V1 distance estimator. Lives in .bss (~60 KB for the buffered
+ * sample window). Owned exclusively by the writer thread between
+ * session_start and session_stop; the start path resets it via
+ * gs_pipeline_session_start() on the first post-handshake sample. */
+static struct gs_pipeline s_pipeline;
+static bool               s_pipeline_seeded;
+static struct gs_pipeline_outputs s_pipeline_outputs;
+static bool               s_pipeline_outputs_valid;
 
 /* --- Helpers --- */
 
@@ -186,6 +203,15 @@ static void writer_entry(void *p1, void *p2, void *p3)
 			while (k_msgq_get(&sample_q, &discard, K_NO_WAIT) == 0) {
 				/* drop any residual samples */
 			}
+			/* Mark the V1 pipeline as needing re-seed on the next
+			 * sample. We don't call gs_pipeline_session_start here
+			 * because we don't have a sample yet — the seed needs
+			 * the first sample's mag_g to prime the HP filter to
+			 * steady state. The writer's drain loop seeds on the
+			 * first sample after this handshake. */
+			s_pipeline_seeded = false;
+			s_pipeline_outputs_valid = false;
+			memset(&s_pipeline_outputs, 0, sizeof(s_pipeline_outputs));
 			k_poll_signal_reset(&start_signal);
 			events[2].state = K_POLL_STATE_NOT_READY;
 			k_sem_give(&start_done_sem);
@@ -196,11 +222,20 @@ static void writer_entry(void *p1, void *p2, void *p3)
 		 * samples. Post-stop stragglers that manage to arrive after
 		 * s_active has been cleared are additionally rejected by the
 		 * s_active guard below, and any that slip through are
-		 * cleaned up by the start-handshake on the next session. */
+		 * cleaned up by the start-handshake on the next session.
+		 * Each sample is also fed to the V1 distance pipeline so the
+		 * algo state stays in lock-step with what's persisted. */
 		if (events[0].state == K_POLL_STATE_MSGQ_DATA_AVAILABLE) {
 			struct gosteady_sample s;
 			while (k_msgq_get(&sample_q, &s, K_NO_WAIT) == 0) {
 				if (!s_active) { continue; }
+				const float mag_g = sqrtf(s.ax * s.ax + s.ay * s.ay
+							  + s.az * s.az) * INV_G_MS2;
+				if (!s_pipeline_seeded) {
+					gs_pipeline_session_start(&s_pipeline, mag_g);
+					s_pipeline_seeded = true;
+				}
+				gs_pipeline_step(&s_pipeline, mag_g);
 				local_batch[batch_fill++] = s;
 				if (batch_fill == SAMPLE_BATCH_COUNT) {
 					(void)writer_flush(local_batch, &batch_fill);
@@ -209,9 +244,18 @@ static void writer_entry(void *p1, void *p2, void *p3)
 			events[0].state = K_POLL_STATE_NOT_READY;
 		}
 
-		/* Stop requested: flush remainder, rewrite header, close. */
+		/* Stop requested: flush remainder, finalize algo, rewrite
+		 * header, close. */
 		if (events[1].state == K_POLL_STATE_SIGNALED) {
 			(void)writer_flush(local_batch, &batch_fill);
+			if (s_pipeline_seeded) {
+				gs_pipeline_finalize(&s_pipeline, &s_pipeline_outputs);
+				s_pipeline_outputs_valid = true;
+			} else {
+				memset(&s_pipeline_outputs, 0,
+				       sizeof(s_pipeline_outputs));
+				s_pipeline_outputs_valid = false;
+			}
 			int hdr_ret   = rewrite_header();
 			int close_ret = fs_close(&s_file);
 			if (hdr_ret < 0 || close_ret < 0) {
@@ -264,7 +308,7 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 	ret = gen_uuid_v4(s_header.session_uuid);
 	if (ret < 0) { return ret; }
 	copy_ascii_field(s_header.device_serial,    sizeof(s_header.device_serial),    "TH91X-0001");
-	copy_ascii_field(s_header.firmware_version, sizeof(s_header.firmware_version), "0.5.0-dev");
+	copy_ascii_field(s_header.firmware_version, sizeof(s_header.firmware_version), "0.6.0-algo");
 	copy_ascii_field(s_header.sensor_model,     sizeof(s_header.sensor_model),     "BMI270");
 	s_header.sample_rate_hz        = 100;
 	s_header.accel_range_g         = 4;
@@ -350,6 +394,37 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 		k_uptime_get_32() - s_session_start_uptime_ms);
 	log_header_base64();
 
+	/* M10 V1 distance estimator outputs. Logged on TWO lines to fit
+	 * Zephyr's per-message buffer (the combined string overflows
+	 * CONFIG_LOG_BUFFER_SIZE's 128-byte deferred-message limit and
+	 * gets truncated mid-UUID). Tag both lines with the same UUID so
+	 * the log parser can join them.
+	 *   ALGO_V1A uuid=<u> distance_ft=<f> R=<f|nan> surface=<n> steps=<u>
+	 *   ALGO_V1B uuid=<u> motion_s=<f> total_s=<f> motion_frac=<f> overflow=<0|1>
+	 * surface: 0=indoor, 1=outdoor (per gs_surface_t).
+	 * R is 'nan' when the session had no walking motion (stationary
+	 * baseline) or when it exceeded the buffered-samples cap. */
+	if (s_pipeline_outputs_valid) {
+		const struct gs_pipeline_outputs *o = &s_pipeline_outputs;
+		char r_buf[16];
+		if (isfinite((double)o->roughness_R)) {
+			snprintk(r_buf, sizeof(r_buf), "%.4f", (double)o->roughness_R);
+		} else {
+			snprintk(r_buf, sizeof(r_buf), "nan");
+		}
+		LOG_INF("ALGO_V1A uuid=%s distance_ft=%.2f R=%s surface=%u steps=%u",
+			uuid_str, (double)o->distance_ft, r_buf,
+			o->surface_class, o->step_count);
+		LOG_INF("ALGO_V1B uuid=%s motion_s=%.2f total_s=%.2f motion_frac=%.3f overflow=%u",
+			uuid_str,
+			(double)o->motion_duration_s,
+			(double)o->total_duration_s,
+			(double)o->motion_fraction,
+			o->buffer_overflowed ? 1u : 0u);
+	} else {
+		LOG_WRN("ALGO_V1 uuid=%s no outputs (pipeline not seeded)", uuid_str);
+	}
+
 	if (out_sample_count != NULL) {
 		*out_sample_count = s_sample_count;
 	}
@@ -373,6 +448,13 @@ int gosteady_session_get_uuid_str(char *out, size_t out_sz)
 
 static int session_writer_init(void)
 {
+	int ret = gs_pipeline_init(&s_pipeline);
+	if (ret < 0) {
+		LOG_ERR("gs_pipeline_init failed (%d)", ret);
+		/* Non-fatal — sessions can still capture, but algo outputs
+		 * will be skipped (s_pipeline_seeded never gets set true
+		 * because gs_pipeline_session_start would fail too). */
+	}
 	k_thread_create(&writer_thread, writer_stack, K_THREAD_STACK_SIZEOF(writer_stack),
 			writer_entry, NULL, NULL, NULL,
 			/* priority: lower than sampler's 5, above main loop */

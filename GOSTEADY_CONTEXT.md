@@ -193,7 +193,22 @@ gosteady-firmware/
 │   ├── main.c                        # LED/heartbeat, button handler, 100 Hz sampler thread
 │   ├── session.h/c                   # Session file format + lifecycle (start/append/stop), msgq + writer thread
 │   ├── dump.h/c                      # uart1 line protocol (LIST/DUMP/DEL/PING)
-│   └── control.h/c                   # Transport-agnostic START/STOP/STATUS JSON parser
+│   ├── control.h/c                   # Transport-agnostic START/STOP/STATUS JSON parser
+│   └── algo/                         # ** M10 on-device V1 distance estimator (DONE 2026-04-25) **
+│       ├── gosteady_algo_params.h    # Auto-generated from algo/export_c_header.py — DO NOT EDIT
+│       ├── gs_filters.h/c            # DF-II-T biquad cascade (CMSIS-DSP layout)
+│       ├── gs_motion_gate.h/c        # Running-σ + Schmitt FSM
+│       ├── gs_step_detector.h/c      # Schmitt peak FSM + per-peak features
+│       ├── gs_roughness.h/c          # Batch motion-gated inter-peak RMS
+│       ├── gs_pipeline.h/c           # Orchestrator + surface classifier + stride sum
+│       └── test_vectors/             # Reference fixtures for the C-port regression suite
+│           ├── indoor_run05_walk_20ft.{bin,json}      # Canonical indoor walk
+│           ├── indoor_run09_stationary_30s.{bin,json} # Stationary robustness check
+│           └── outdoor_run13_walk_20ft.{bin,json}     # Cross-surface (outdoor) walk
+├── tests/host/                       # ** Host-side algo regression suite (no Zephyr dep) **
+│   ├── Makefile                      # `make` builds + runs against the .bin fixtures
+│   ├── test_loader.h/c               # Fixture loader (mirrors algo/export_reference_vectors.py layout)
+│   └── test_main.c                   # Per-module + end-to-end checks (31/31 passing)
 ├── bridge_fw/                        # ** nRF5340 bridge firmware (vendored fork of Nordic's) **
 │   ├── PATCHES.md                    # What we changed and why
 │   ├── boards/thingy91x_nrf5340_cpuapp.overlay  # uart1 default 1 Mbaud (load-bearing!)
@@ -225,6 +240,8 @@ gosteady-firmware/
 │   ├── run_roughness_experiment.py   # Roughness-modulated combined regression (Path E)
 │   ├── run_auto_surface.py           # ★ Auto-surface classifier — winning v1 architecture
 │   ├── run_summary.py                # Per-run consolidated summary table for anomaly scanning
+│   ├── export_c_header.py            # ★ Emit src/algo/gosteady_algo_params.h from locked V1 (M10 prereq #1)
+│   ├── export_reference_vectors.py   # ★ Emit src/algo/test_vectors/*.{bin,json} regression fixtures (M10 prereq #2)
 │   ├── figures/                      # Generated plots (gitignored)
 │   ├── venv/                         # Self-contained Python 3.14 env (gitignored)
 │   ├── requirements.txt              # Loose pins
@@ -264,11 +281,12 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
 7. **Python CLI** — host tool for session control and data dump. *(done 2026-04-23 — superseded by the M3 popup + `tools/ingest_capture.py` + `tools/cleanup_device.py` combination. `control.py` remains as the bench-open-cap fallback. No unified CLI needed; the operator workflow is fully browser-driven now.)*
 8. **Dataset collection** — run the capture protocol end-to-end. *(paused at 19/30 — 10 indoor polished concrete + 8 outdoor concrete sidewalk + 1 outdoor stationary baseline. Carpet runs 21–30 deferred to v1.5 retrain by decision 2026-04-25; algorithm pipeline now ships with auto-surface adjustment so capturing more data is a tuning task, not a release blocker.)*
 9. **Python algorithm** — distance estimator trained on the dataset. *(Phase 1–4 done 2026-04-25. Architecture: streaming filter + motion gate + Schmitt peak FSM + single-feature stride regression + **auto-surface classifier** (motion-gated inter-peak RMS roughness metric → R-thresholded coefficient lookup). Cross-surface LOO at n=16: 22.4% pooled MAPE, 15/16 walks correctly auto-classified. v1.5 retrain at n=24+ planned post-carpet captures.)*
-10. **C port** — move the estimator on-device. *(← next — all algo blocks are streaming-shaped; translation is mechanical. Adds ~30 lines for the roughness metric + classifier-table lookup at session close.)*
-11. **Validation** — hold-out error characterization.
-12. **Cellular** — LTE-M / NB-IoT link up on nRF9151.
-13. **Cloud backend** — session telemetry upload.
-14. **Production telemetry** — battery, errors, OTA hooks.
+10. **C port** — move the estimator on-device. *(done 2026-04-25 — `src/algo/{gs_filters,gs_motion_gate,gs_step_detector,gs_roughness,gs_pipeline}.h/c` + auto-generated `gosteady_algo_params.h`. Wired into `src/session.c` writer thread; emits two `ALGO_V1{A,B}` log lines at session close with distance_ft, R, surface_class, step_count, motion_s, total_s, motion_frac, overflow flag. Host regression suite (`tests/host/`, `make`-driven, no Zephyr/CMSIS dep) runs against the three M10 reference vectors and passes 31/31 checks within float32-vs-float64 tolerance. Firmware version bumped to `0.6.0-algo`. Stationary on-device validation passes (0 steps / 0 ft / NaN R, exactly mirroring `indoor_run09` fixture). Walking-path on-device validation pending physical motion test.)*
+10.5. **Field deployment requirements** — define the firmware capability set + cloud contract for the first remote deployment (3 Thingy:91 X units, rehab clinic, ~1 month, cellular only, no charging, no OTA, no user interaction). Drives M11–M14 sequencing. *(active in parallel with M10 — see "Field Deployment (M10.5)" section + "Portal Scope Impact" section.)*
+11. **Validation** — hold-out error characterization. (Algorithm-side: re-run cross-surface LOO with M10 C outputs from reference vectors; deployment-side: continuous in-field comparison against any clinic-supplied ground truth.)
+12. **Cellular** — LTE-M / NB-IoT link up on nRF9151. (Scoped by M10.5: MQTT/TLS to AWS IoT Core, hourly heartbeat, session-end activity uplink, opportunistic snippet flush.)
+13. **Cloud backend** — session telemetry upload. (Coordinated with portal Phase 1A/1B — already specified; firmware-side work is the on-device side of the contract.)
+14. **Production telemetry** — battery (nPM1300 fuel gauge), error/fault counters, OTA hooks. (M10.5 defines what's required vs. nice-to-have for first deployment.)
 15. **Field testing.**
 
 ---
@@ -505,29 +523,254 @@ The prior `.dat` format (tab-separated, 7 columns, 99.3 Hz) is *not* what our fi
 
 ---
 
+## Field Deployment (M10.5) — First Clinic Deployment Requirements
+
+This section defines what the firmware must do to ship the first remote deployment. Decisions captured here drive the M11–M14 work plan; nothing in M10.5 is itself implementation, but every M10.5 line item has a downstream firmware milestone or a portal-coordination dependency in the Portal Scope Impact section.
+
+### Deployment profile
+
+| Item | Value | Source |
+|---|---|---|
+| Units | 3 | Decided 2026-04-25 |
+| Site | Single rehab clinic | Decided 2026-04-25 |
+| Duration | ~1 month | Decided 2026-04-25 |
+| Hardware | Thingy:91 X (no custom PCB) | Decided 2026-04-25 |
+| Connectivity | Cellular only (LTE-M primary, NB-IoT fallback per portal spec) | Portal ARCHITECTURE.md §1 |
+| Charging | None — battery must last the deployment on a single charge (1300 mAh) | Decided 2026-04-25 |
+| OTA | None — firmware is fixed for the deployment duration | Decided 2026-04-25 (matches portal Phase 5A deferral of OTA pipeline) |
+| User interaction | None — clinic staff observe via portal only | Decided 2026-04-25 |
+| Mounting | Custom housing, designed separately | Decided 2026-04-25 |
+
+### Success criteria (all three)
+
+1. **Reliability** — devices stay alive and uplinking for the full deployment window with no physical intervention.
+2. **Algorithm validation** — distance estimates uplinked per session are evaluable against any clinic-supplied ground truth (PT session logs, observed walks).
+3. **v1.5 retrain corpus** — raw IMU snippets retrieved on device return seed coefficient retraining for the next algorithm version.
+
+### Hard requirements (must ship in deployment build)
+
+- **Auto-start session capture on motion.** ADXL367 wake-on-motion via INT1 line wakes the nRF9151 from deep sleep; nRF9151 confirms sustained motion via short BMI270 sample window before opening a session. No SW0 button, no BLE START path enabled.
+- **Auto-stop session on stationarity.** Hysteresis-based stop: N seconds of below-motion-gate σ ends the session. Tunable threshold; default 30 s.
+- **Sleep-when-idle as the default state.** Between sessions: nRF9151 in deep sleep (System OFF or System ON-Idle depending on what the LTE-M context allows), BMI270 powered down (not just idle), ADXL367 in low-power motion-detect mode, modem in PSM. Wake sources: ADXL367 INT1 (motion), modem (heartbeat alarm), watchdog.
+- **Hourly heartbeat uplink.** Every 60 min the modem wakes from PSM, publishes a heartbeat to `gs/{serial}/heartbeat`, and returns to PSM. Contract per portal spec — see Portal Scope Impact.
+- **Per-session activity uplink.** On session close, after on-device M10 algorithm finishes computing distance/R/active_minutes/step_count, publish to `gs/{serial}/activity`. Idempotent on `(serial, session_end)`.
+- **Pre-activation gate.** A device that has not yet received its first cloud activation message refuses to capture sessions. Behavior: wake on motion → connect → publish heartbeat → wait for activation → if not activated, return to sleep without opening any session. Visual indicator: blue LED slow-blink (1 Hz, 100 ms on / 900 ms off) while in `ready_to_provision` state. LED off in normal operation (battery + clinic-discretion). See Portal Scope Impact for the activation message contract.
+- **Snippet capture — session-aligned by construction.** Snippets are guaranteed-motion slices because they are always portions of real sessions; there is no standalone snippet-capture path with its own motion gate. Two trigger types:
+    - **Scheduled snippet** — every 6 hr a schedule timer fires and sets a `snippet_armed_scheduled` flag. The *next* session that opens (whenever motion next causes one) captures its first 30 s (or its entirety, if shorter) as a retained snippet. Flag clears on capture; timer resets on capture, NOT on tick. If the walker is unused for days, the schedule simply waits — no stationary garbage gets recorded.
+    - **Anomaly snippet** — post-hoc decision at session close. If the just-finished session triggers an anomaly condition (R out-of-bin vs. running history, session σ outlier, peak |a| > 4 g), promote its raw data from the session partition (which rotates) to the snippet partition (which doesn't).
+    Hard cap: 8 snippets/day total across both trigger types. Each snippet ≤ 30 s of raw 100 Hz BMI270 (~84 KB max; typically smaller given short clinic walks). Implementation footprint is two flags (`snippet_armed_scheduled`, `anomaly_this_session`) plus a "promote to snippet partition" copy at session close — no new state machine.
+- **Snippet upload — opportunistic + Priority-2.** See Snippet Upload Policy below. Goal: get snippets to cloud when battery permits; otherwise retain on flash for USB retrieval on device return.
+- **Persistent crash forensics.** Reset-reason register, fault counter, last N log lines (or fault frame), watchdog hit counter — all persisted across reset in a dedicated flash region (separate from LittleFS so a corrupted FS doesn't take the postmortem with it). Included as fields in the next heartbeat after reset; full context retrievable via USB on device return.
+- **Watchdog.** Hardware watchdog kicked from a dedicated supervisor thread; if any pinned thread (sampler, writer, modem, supervisor) misses its beacon, the watchdog fires and the reset is captured by the forensics path above.
+- **Cellular network time sync.** UTC obtained via `AT+CCLK?` on each modem attach; used to stamp `session_start`, `session_end`, and heartbeat `ts`. Drift expected to be <1 s over a heartbeat interval.
+- **Manually-flashed per-device cert.** No fleet provisioning for first 3 units (per portal coordination). Per-device cert + private key flashed at build time, stored in nRF9151 CryptoCell-312 / TF-M secure element. Each unit gets a distinct serial `GS00000000XX` baked at flash time.
+- **Battery measurement via nPM1300.** Fuel gauge reads `battery_mv` and `battery_pct` for inclusion in heartbeat payload. Currently stamps `0` — must be wired before deployment.
+
+### Power budget (preliminary — to be measured, not a constraint at this stage per 2026-04-25 decision)
+
+Rough back-of-envelope to size expectations:
+
+| Component | Avg current | Notes |
+|---|---|---|
+| Heartbeat uplinks @ 1/hr | ~0.33 mA | 24/day × ~50 mC/uplink LTE-M |
+| Activity uplinks (sessions) | ~0.05 mA | ~5/day × ~50 mC/uplink |
+| Snippet uplinks (Priority-2) | ~0.05–0.2 mA | piggyback on cellular wakes; 1/wake max |
+| Session capture (BMI270 + nRF9151 active) | ~2.5 mA | ~2 hr/day @ 30 mA active |
+| Sleep + ADXL367 motion-detect background | ~0.05 mA | nRF9151 deep sleep + ADXL367 low-power |
+| **Total avg** | **~3 mA** | → ~18 days at 1300 mAh |
+
+The hourly-heartbeat × 1300 mAh × 1-month combination is acknowledged as tight (~18 days projected). Decision was to ship with hourly cadence and **measure actual battery life as a deployment outcome**, not pre-tune. If first-deployment battery falls short, options: relax heartbeat cadence (with portal-side offline-detector adjustment), upgrade battery, or both.
+
+### Snippet upload policy
+
+This is firmware-internal policy (no portal contract for snippets in v1).
+
+- **Trigger to upload:** every cellular wake that opens for a Priority-1 publish (heartbeat or activity) is a candidate snippet-flush window.
+- **Order of operations within a wake:** modem attach → publish all queued Priority-1 → wait for ACK → if `battery_pct ≥ 30%` AND queued snippets exist, publish 1 snippet → wait for ACK → detach. Hard cap: 1 snippet per cellular wake regardless of backlog.
+- **Battery floor:** `battery_pct < 30%` skips snippet upload entirely. Heartbeats continue at full cadence — they are non-negotiable for the offline-detection contract.
+- **Order across snippets:** FIFO oldest-first.
+- **Post-upload retention:** uploaded snippets are marked `uploaded = true` but **not deleted** until storage pressure forces rotation. USB retrieval on device return still pulls every snippet that was ever captured, even those already in cloud — belt-and-suspenders.
+- **Storage-full behavior:** when the snippet partition crosses 90% full, *promotion-to-snippet* declines for both trigger types (do NOT overwrite unsent snippets — they're the v1.5 retrain corpus). Sessions still record + summarize normally; only the snippet copy is skipped. Capture resumes when uploads or USB retrieval frees slots, OR when the stale-cutoff (14 days) lets us overwrite older uploaded snippets first.
+- **8/day cap applies to both trigger types pooled.** Once today's count reaches 8, further triggers (scheduled or anomaly) decline-with-log until midnight UTC reset.
+
+### Offline buffering policy (firmware-internal; cloud handles dedup via portal contract)
+
+- **Priority 1 (heartbeat + activity):** queue in RAM if cellular session in progress; if modem unavailable, persist to a small dedicated buffer in flash (NOT LittleFS — separate region so FS pressure doesn't lose telemetry). On next cellular wake, drain Priority-1 queue first, oldest-first.
+- **Priority 2 (snippets):** stored in LittleFS snippet partition as the buffer. No separate queue.
+- **Cloud idempotency** (per portal spec) means firmware can retry freely without duplicate-row risk: heartbeats dedup by `(serial, ts)`-class, activity dedups by `(serial, session_end)`, alerts dedup by `(patientId, ts#alertType)`. Firmware retry strategy: exponential backoff on failure, no upper retry limit, persist queue across reset.
+
+### Storage layout (changes from current)
+
+Current LittleFS partition is 8 MB at `0x4d2000–0xcd2000`; remaining ~19 MB on the GD25LE255E (32 MB) is unused. M10.5 needs to repartition:
+
+| Partition | Size | Purpose |
+|---|---|---|
+| LittleFS sessions + summaries | 8 MB (unchanged) | Raw `.dat` sessions (rotated aggressively) + small summary records |
+| LittleFS snippets | ~16 MB (new — carved out of the 19 MB unused) | Snippet ring with capture-pause-when-full + 14-day stale cutoff |
+| Telemetry queue | ~256 KB | Persistent Priority-1 queue (separate region; not LittleFS) |
+| Crash forensics | ~64 KB | Reset reason, fault counters, last log lines, watchdog hits |
+
+Repartition is a one-time partition-manager change in `pm_static.yml`; needs `-p always` rebuild.
+
+### Anti-features (explicitly NOT in first deployment)
+
+- **No fall / tipover / impact detection.** The portal spec defines an alert payload schema with `alert_type ∈ {tipover, fall, impact}` (`gs/{serial}/alert`); shipping that detector is its own algorithm milestone with zero current Python prototype work. Deferred. Portal alert channel exists but firmware does not publish to it in v1.
+- **No fleet provisioning / claim-cert flow.** Manual per-device cert at flash time covers 3 units. Fleet provisioning is portal Phase 5A; firmware-side integration to be addressed at scale.
+- **No OTA.** MCUboot partition layout is preserved (so future OTA is non-breaking) but no AWS IoT Jobs client in the deployment build.
+- **No downlink config.** All knobs are compile-time constants in the deployment build. Portal `cmd` topic intentionally not subscribed (portal spec also defers this).
+- **No active LEDs in normal operation.** Pre-activation blue LED is the only LED behavior in deployment. Heartbeat tick + green/purple session LEDs are gated off via `CONFIG_GOSTEADY_FIELD_MODE`.
+- **No fall back to USB / BLE control surface.** Both transports are compiled out (or runtime-disabled) in the deployment build to prevent accidental use in field. Re-enable for return-to-bench debug.
+- **No real-time streaming.** All uplinks are summary-form (heartbeat, session-end activity). Snippets are bulk-uploaded post-hoc, not streamed.
+- **No on-device patient identity.** Per portal contract, attribution is post-hoc cloud-side via DeviceAssignment lookup on `serial`. PRE-WALK schema fields (`subject_id`, `course_id`, etc.) that the bench operator filled via `capture.html` are stamped with deployment-mode placeholders (e.g. `subject_id = "deployed"`, `course_id = "field"`).
+
+### Risks and open items
+
+| Risk | Mitigation |
+|---|---|
+| Hourly-heartbeat × 1300 mAh × 1 month is tight (~18 day projection). | Measure in deployment; have a "site survey" unit that ships first with full instrumentation. Negotiate cadence relax with portal team if first-week data is bad. |
+| Cellular coverage at clinic unknown. | Site-survey unit goes first (1-2 weeks before main 3-unit deployment) — confirms LTE-M signal + battery behavior before committing the other two units. |
+| Crash forensics path is new code that must work the first time (no OTA to fix it). | Stress-test on bench: forced HardFaults, forced watchdog hits, forced fault-during-FS-write. Verify forensics survive reset and surface in the next heartbeat. |
+| Snippet partition fills mid-deployment. | 14-day stale cutoff + promotion-skip-when-full prevents data loss. Realistic fill rate is well under the 84 KB max because clinic walks are typically 5-20 s (≈14-56 KB per snippet), so 16 MB partition holds ~300 typical snippets ≈ 37 days at the 8/day cap before any stale-cutoff overwrites. |
+| Battery measurement (nPM1300 fuel gauge) not yet wired. | Pre-deployment milestone — must be done before site-survey unit ships. |
+| Pre-activation contract is portal-side TBD. | Coordination item in Portal Scope Impact; blocking for site-survey unit ship. |
+| nPM1300 / fuel-gauge accuracy unknown over month-long discharge. | Calibrate against known-good measurement on bench before deployment. |
+| Custom housing thermal / mechanical impact on IMU readings unknown. | Bench-shakedown with custom housing before deployment to confirm no σ shift. |
+
+---
+
+## Portal Scope Impact
+
+This section is the **firmware ↔ portal coordination ledger**. Every contract decision between firmware and the GoSteady portal lives here so both sides have a single source of truth. Updated whenever a contract or behavior is agreed, deferred, or changed.
+
+Source documents on the portal side: `~/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/gosteady-portal/docs/specs/` — `ARCHITECTURE.md`, `phase-1a-ingestion.md`, `phase-1b-processing.md`, `phase-2a-device-lifecycle.md`. Re-read those when planning anything portal-touching; they're the authoritative spec on the cloud side.
+
+### Identity & provisioning (FIRST DEPLOYMENT)
+
+| Item | Decision | Status |
+|---|---|---|
+| Device ID format | `GS` + 10 digits (e.g. `GS0000001234`). Used as MQTT client ID + IoT Thing Name. | Locked by portal spec |
+| Auth (first 3 units) | Per-device cert + private key flashed manually at build time, stored in nRF9151 CryptoCell-312 / TF-M secure element. | **Locked 2026-04-25** — defers AWS IoT fleet provisioning for first deployment |
+| Auth (post-first-deployment) | AWS IoT Fleet Provisioning with claim cert at flash time + CSR exchange on first boot | Deferred to portal Phase 5A coordination |
+| First-boot binding | Cloud-side state machine: `ready_to_provision` → `provisioned` → `active_monitoring` driven by first-heartbeat | Portal-side; no firmware action beyond "send heartbeat normally" |
+
+### Pre-activation behavior (NEW — needs portal-side spec)
+
+| Item | Decision | Status |
+|---|---|---|
+| Firmware behavior pre-activation | No session capture. Wake on motion → connect → publish heartbeat → wait for activation message → if absent, return to sleep. | **Locked firmware-side 2026-04-25** |
+| Visual indicator | Blue LED slow-blink (1 Hz, 100 ms on / 900 ms off) while in `ready_to_provision` state. LED extinguishes once activation message received. | **Locked firmware-side 2026-04-25** |
+| Activation message contract | **OPEN** — portal needs to define: topic, payload schema, what counts as "activation acknowledged" by the firmware (just receipt? receipt + state-write to flash? specific message field?). | **Coordination needed with portal team** |
+
+### Transport & topics
+
+| Item | Decision | Status |
+|---|---|---|
+| Protocol | MQTT over TLS 1.2 to AWS IoT Core (us-east-1) | Locked by portal spec |
+| Heartbeat topic | `gs/{serial}/heartbeat` | Locked by portal spec |
+| Activity topic | `gs/{serial}/activity` | Locked by portal spec |
+| Alert topic | `gs/{serial}/alert` (firmware does NOT publish in first deployment — see Anti-features above) | Channel exists; firmware deferred |
+| Downlink / `cmd` topic | Not used in first deployment. Portal Phase 1A "Open Questions" list this as TBD. | **Not needed for first deployment** |
+
+### Heartbeat uplink
+
+| Item | Decision | Status |
+|---|---|---|
+| Cadence | 1 hr | **Locked 2026-04-25** — accepting tight battery budget; measure actual life as deployment outcome |
+| Cloud offline-detection threshold | > 2 hr without heartbeat → device marked offline | Locked by portal spec |
+| Required payload fields | `serial`, `ts` (ISO 8601 UTC), `battery_pct` (0.0–1.0), `rsrp_dbm` (−140 to 0), `snr_db` (−20 to 40) | Locked by portal spec |
+| Optional payload fields | `battery_mv`, `firmware` (semver string), `uptime_s` | Locked by portal spec |
+| Firmware-added (non-portal-spec) fields | `reset_reason`, `fault_counters{...}`, `watchdog_hits` — for crash forensics. **Portal must accept extra fields gracefully OR ignore them.** | **Coordination needed** |
+| Storage in cloud | AWS IoT Device Shadow `reported` state (not DynamoDB direct write) | Locked by portal spec |
+
+### Activity uplink
+
+| Item | Decision | Status |
+|---|---|---|
+| Trigger | On session close (after on-device M10 algorithm computes outputs) | Locked firmware-side |
+| Required payload fields | `serial`, `session_start` (ISO 8601), `session_end` (ISO 8601), `steps` (int 0–100,000), `distance_ft` (number 0–50,000), `active_min` (int 0–1,440) | Locked by portal spec |
+| Firmware-derived extras to propose | `roughness_R` (float), `surface_class` (`indoor`/`outdoor` per M9 classifier), `firmware_version` | **Coordination needed — propose addition to portal contract** |
+| Idempotency | `(serial, session_end)` — firmware retries are safe | Locked by portal spec |
+| Patient attribution | Post-hoc, cloud-side, by `serial` → DeviceAssignment lookup. Firmware does NOT receive or send `patient_id`. | Locked by portal spec |
+
+### Alerts (DEFERRED)
+
+| Item | Decision | Status |
+|---|---|---|
+| Channel exists | `gs/{serial}/alert` with `alert_type ∈ {tipover, fall, impact}` and `severity ∈ {critical, warning, info}` | Locked by portal spec |
+| Firmware ships event detection in first deployment | **No** — fall/tipover/impact algorithm has zero Python prototype; deferred to a later algorithm milestone | **Locked 2026-04-25** |
+| Cloud-side synthetic alerts (e.g. `device_offline`, `battery_critical`) | Generated by Threshold Detector from heartbeat data — firmware does nothing | Locked by portal spec |
+
+### Snippets / raw IMU data
+
+| Item | Decision | Status |
+|---|---|---|
+| Portal spec coverage | Silent — no contract for snippet upload in Phase 1 | — |
+| First-deployment plan | Firmware-side only. Stored on flash, retrieved via USB on device return. | **Locked 2026-04-25** |
+| Opportunistic upload | Firmware piggybacks snippet upload on cellular wakes opened for Priority-1 publishes. See Snippet Upload Policy in M10.5 section. | **Locked 2026-04-25 firmware-side** |
+| Snippet upload schema | **OPEN** — when/if upload path is added, need cloud endpoint + payload schema + retention policy. | **Coordination needed** |
+
+### OTA
+
+| Item | Decision | Status |
+|---|---|---|
+| Protocol target | AWS IoT Jobs + S3 + MCUboot (signed, anti-rollback) | Locked by portal spec |
+| First deployment | **Not in scope** — firmware fixed for the deployment duration | **Locked 2026-04-25** |
+| Forward-compatibility | MCUboot partition layout preserved in deployment build so future OTA is non-breaking. | Already true in current build |
+
+### Time sync
+
+| Item | Decision | Status |
+|---|---|---|
+| Mechanism | Cellular network time via `AT+CCLK?` on each modem attach | **Locked firmware-side 2026-04-25** — portal spec is silent |
+| Acceptable accuracy | ~seconds for ISO 8601 timestamps in payloads | Inferred from portal payload semantics |
+| Fallback | None in v1 (no NTP, no RTC battery backup) | **Locked firmware-side** |
+
+### Configuration management (no downlink in v1)
+
+| Item | Decision | Status |
+|---|---|---|
+| Config delivery | Compile-time constants only. No runtime config update path. | **Locked 2026-04-25** |
+| Knobs frozen at flash time | Heartbeat cadence (1 hr), snippet schedule (4/day + ≤4 anomaly), motion-gate thresholds, R classifier τ, sleep timeouts, battery floor for snippet upload (30%), all algorithm coefficients (`gosteady_algo_params.h` from M10) | Document in deployment build's `prj.conf` + `gosteady_algo_params.h` |
+
+### Open coordination items
+
+These need portal-team conversation before site-survey unit ships:
+
+1. **Activation message contract** — topic, schema, ack semantics. Blocks pre-activation gate verification.
+2. **Heartbeat extra fields** — confirm portal accepts (or gracefully ignores) `reset_reason`, `fault_counters`, `watchdog_hits` extension. Without this, crash forensics is USB-retrieval-only and we lose mid-deployment visibility.
+3. **Activity extra fields** — propose `roughness_R`, `surface_class`, `firmware_version` additions. These are useful for portal-side anomaly dashboards and v1.5 retrain triage.
+4. **Site-survey unit timeline** — when does first unit ship to the clinic for cellular + battery shakedown ahead of the 2-unit main deployment?
+
+---
+
 ## Immediate Next Steps
 
-The M9 algorithm architecture is locked as of 2026-04-25 (auto-surface roughness adjustment, 22.4% pooled MAPE LOO at n=16). The user has explicitly chosen to **proceed to M10+ now** rather than wait for the carpet captures to finish — the v1 algorithm ships with auto-surface from the start, and v1.5 retrains coefficients with more data later.
+The M9 algorithm architecture is locked as of 2026-04-25 (auto-surface roughness adjustment, 22.4% pooled MAPE LOO at n=16). The user has explicitly chosen to **proceed to M10+ now** rather than wait for the carpet captures to finish — the v1 algorithm ships with auto-surface from the start, and v1.5 retrains coefficients with more data later. M10 (C port) and M10.5 (deployment requirements + portal coordination) run in parallel; M11–M14 are scoped by what M10.5 lands on.
 
-### Track A — M10 (C port), now active
+### Track A — M10 (C port), DONE 2026-04-25
 
-The algo/ package was designed for direct translation. Module-by-module mapping:
+The full V1 distance estimator runs on-device. Modules under `src/algo/` (one .h + .c each):
 
-- `filters.py::BiquadSOS.step()` → `arm_biquad_cascade_df2T_f32` (CMSIS-DSP). Drop-in.
-- `motion_gate.py::MotionGate.step()` → C struct: ring buffer + two running sums + one hysteresis counter. ~30 lines.
-- `step_detector.py::StepDetector.step()` → two-state FSM with three accumulators. ~50 lines.
-- `roughness.py::inter_peak_rms_g()` → online accumulator over `(motion_mask & ~peak_window)` samples; tracked alongside the writer thread, finalized at session close. ~20 lines.
-- `stride_model.py` inference → table lookup by R bin + 2 MACs per peak. ~10 lines.
+- `gs_filters` — DF-II-T biquad cascade. Coefficients in CMSIS-DSP `arm_biquad_cascade_df2T_f32` storage layout (`a1`/`a2` already-negated per CMSIS convention) so the on-device path can later swap to CMSIS-DSP without touching the algo header. Currently uses our own biquad (~25 LoC) — portable to host tests and bit-equivalent.
+- `gs_motion_gate` — running-σ + Schmitt FSM with hysteresis. Fixed 64-sample ring (handles the V1 50-sample / 500ms window with headroom).
+- `gs_step_detector` — Schmitt FSM + per-peak features (amplitude, duration, energy). Mirrors the Python including the off-by-one duration vs energy-sum-includes-exit-sample quirk; tests caught + locked the convention.
+- `gs_roughness` — batch motion-gated inter-peak RMS. Streaming variant deferred — the orchestrator buffers `mag_lp` + `motion_mask` in RAM (12000 sample cap = 120s @ 100Hz, 60 KB) and runs the batch at session close. Sessions exceeding the cap still emit distance/step_count/active_minutes correctly; only `roughness_R` falls back to NaN with `buffer_overflowed=true`.
+- `gs_pipeline` — orchestrator. `init` → `session_start(first_mag_g)` (primes HP filter to steady-state at the first sample's gravity) → `step(mag_g)` per sample → `finalize(&outputs)`. Outputs: `distance_ft`, `roughness_R`, `surface_class`, `step_count`, `motion_duration_s`, `total_duration_s`, `motion_fraction`, `buffer_overflowed`.
 
-The M10 deliverable is:
+Integration in [src/session.c](src/session.c): the writer thread feeds every persisted sample to `gs_pipeline_step()`. At session stop, after the final `writer_flush` and before the header rewrite, `gs_pipeline_finalize()` runs and the outputs are emitted as two log lines (split because the combined string overflows Zephyr's per-message buffer):
 
-1. A generated C header (`src/algo/gosteady_algo_params.h`) emitted from Python — Butterworth coefficients, motion-gate thresholds, peak Schmitt thresholds, R-classifier threshold, and the per-surface coefficient table.
-2. `src/algo/*.c` — one file per Python module, line-by-line translations.
-3. **Reference vectors**: feed a pulled `.dat` through Python `apply()`, capture filter / gate / peak / R / distance outputs per sample, store as float32 fixtures. The C port's unit tests must match these bit-close. This is the regression suite that catches translation errors during the port.
-4. Session-close hook in `src/session.c` to compute distance + R + active_minutes from the just-closed session, log them alongside the existing base64 header dump, and stamp them into the session file's reserved header bytes.
-5. **Algorithm versioning**: bump `firmware_version` to `0.6.0-algo` once the port is verified, so ingest can distinguish pre-algo and post-algo session files.
+```
+ALGO_V1A uuid=<u> distance_ft=<f> R=<f|nan> surface=<n> steps=<u>
+ALGO_V1B uuid=<u> motion_s=<f> total_s=<f> motion_frac=<f> overflow=<0|1>
+```
 
-The 19-run dataset (10 indoor + 8 outdoor + 1 outdoor stationary) is enough to ship initial coefficients into the C header. v1.5 regenerates the header from the 30+ run dataset once carpet captures land.
+`prj.conf` adds `CONFIG_CBPRINTF_FP_SUPPORT=y` so `%f` renders actual numbers (without it, the deferred-logging backend prints `*float*`). `firmware_version` in the session header bumped to `0.6.0-algo` so any session captured by this build is unambiguously identifiable. Algo outputs are NOT yet stamped into the 256-byte header's `_reserved[67]` block — that's a follow-up; for now the log line is the canonical channel.
+
+**Host regression suite** at [tests/host/](tests/host/): `make` builds the algo .c files + `test_main.c` + `test_loader.c` against the host's compiler (no Zephyr/CMSIS dep), runs the three M10 reference vectors through five test layers (HP, LP, motion gate, step detector, end-to-end pipeline), passes 31/31 checks within float32-vs-float64 tolerance. Tightest result: indoor_run05 distance differs from Python by 0.0007% (14.972 ft on-device vs 14.972 ft Python LOO). Loosest: outdoor_run13 R differs by 0.27% — within expected float32 cumulative roundoff. Per-peak detail is "best-effort match" rather than strict because float32 cumulative noise can shift threshold-crossing peaks ±a-few samples without changing the regression sum.
+
+**On-device validation:** stationary baseline (cap on desk, 8s session) emits `distance_ft=0.00 R=nan surface=0 steps=0 motion_s=0.00` — exactly mirrors the `indoor_run09` fixture's expected output. No `writer fs_write` errors (the 2026-04-25 STOP-race fix held). Walking-path on-device validation is the one outstanding piece — needs a physical "pick up the cap and walk" test to confirm the on-device numbers match what the algo predicts for the same data when run in Python.
+
+The 19-run dataset (10 indoor + 8 outdoor + 1 outdoor stationary) is enough to ship initial coefficients into the C header. v1.5 regenerates the header from the 30+ run dataset once carpet captures land — the architecture is unchanged across that transition; only `gosteady_algo_params.h` rolls forward.
 
 ### Track B — Resume M8 captures (runs 21–30 carpet) when convenient
 
@@ -565,13 +808,18 @@ algo/venv/bin/python3 -m algo.run_summary
 
 Outstanding: **outdoor s-curve (run 18)** is still missing from the v1 dataset (skipped on 2026-04-25 due to spacing). Worth grabbing on the next outdoor session.
 
-### Track C — Parallel work that doesn't depend on data
+### Track C — M10.5 deployment-prep work (parallel to M10 algo port)
 
-These can proceed independently of M8/M9 retrain:
+These are the firmware tracks that M10.5 calls out as required for first deployment. All proceed independently of M8/M9 retrain. Scope and contracts are defined in the **Field Deployment (M10.5)** + **Portal Scope Impact** sections above.
 
-- **M12 (Cellular):** zero algorithm dependence. Brings RTC time → fills `session_*_utc_ms` (currently stamped 0). Long lead time on provisioning + RF tuning, so worth starting.
-- **M13 (Cloud backend):** versioned telemetry payload schema = FIRMWARE+PRE-WALK header + new outputs (`distance_ft`, `motion_duration_s`, `step_count`, `roughness_R`, `surface_classification`). Schema is stable; can build the upload + storage path now.
-- **M14 (Production telemetry):** nPM1300 fuel gauge for `battery_mv_*`, error/event codes, OTA hooks. Orthogonal to algorithm.
+- **Cellular (LTE-M / NB-IoT) + MQTT/TLS to AWS IoT Core** — heartbeat publish on `gs/{serial}/heartbeat` every hour, activity publish on `gs/{serial}/activity` per session close. Per-device cert flashed manually (no fleet provisioning for first 3 units). Cellular network time via `AT+CCLK?` fills `session_*_utc_ms`. Long lead time on provisioning + RF; start now.
+- **Power architecture** — ADXL367 wake-on-motion as primary out-of-session wake source; nRF9151 deep sleep + BMI270 power-down between sessions; LTE-M PSM with hourly wake. This is the single most impactful work for hitting the 1-month battery target.
+- **nPM1300 fuel gauge wiring** — must land before site-survey unit ships. Fills `battery_mv` + `battery_pct` in heartbeat payload.
+- **Crash forensics** — persistent reset reason + fault counters + last-N log lines + watchdog hit counter in a dedicated flash region (separate from LittleFS); surfaced in next heartbeat after reset. Hardware watchdog kicked from a dedicated supervisor thread.
+- **Storage repartition** — grow LittleFS into the unused 19 MB on the GD25LE255E to add a snippet partition (~16 MB) + dedicated telemetry queue + crash-forensics region. Done via `pm_static.yml`; needs `-p always` rebuild.
+- **Snippet capture + storage** — scheduled (4/day) + anomaly-triggered (≤4/day cap), 30 s windows of raw 100 Hz BMI270 stored in the new snippet partition. Capture-pause-when-full and 14-day stale cutoff per M10.5 policy.
+- **`CONFIG_GOSTEADY_FIELD_MODE` Kconfig** — gates off heartbeat tick LED + session LEDs + bench USB/BLE control surface. Pre-activation blue LED is the only LED behavior. Enables one build target for deployment vs bench.
+- **Pre-activation gate** — refuses session capture until first cloud activation message received. Blocked on portal-side activation contract definition (open coordination item #1).
 
 ### v1.5 retrain (after M10 ships, when carpet + extra data lands)
 

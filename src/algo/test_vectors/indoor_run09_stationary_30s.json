@@ -1,0 +1,55 @@
+{
+  "magic": "GS_REFVT",
+  "version": 1,
+  "name": "indoor_run09_stationary_30s",
+  "note": "Indoor polished concrete, run 9, stationary baseline, 30 s parked. Robustness vector \u2014 distance must be < 1 ft.",
+  "source_dat": "raw_sessions/2026-04-23/ca82711e-12ab-4024-b4a6-e79eb3233887.dat",
+  "session_uuid": "ca82711e-12ab-4024-b4a6-e79eb3233887",
+  "annotations_subset": {
+    "course_id": "concrete_A_straight",
+    "intended_distance_ft": "0",
+    "actual_distance_ft": "0",
+    "intended_speed": "slow",
+    "direction": "straight",
+    "run_type": "stationary_baseline",
+    "surface": "polished_concrete"
+  },
+  "n_samples": 3714,
+  "n_peaks": 0,
+  "fs_hz": 99.99730683256578,
+  "surface_class": 0,
+  "surface_name": "indoor",
+  "session_outputs": {
+    "step_count": 0,
+    "motion_duration_s": 0.0,
+    "motion_fraction": 0.0,
+    "total_duration_s": 37.141000269323996,
+    "roughness_R": null,
+    "distance_ft": 0.0
+  },
+  "coeffs_in_use": {
+    "indoor": [
+      0.2270902338364803,
+      2.8042846877379506
+    ],
+    "outdoor": [
+      -0.07434298963522212,
+      1.8200373857921033
+    ],
+    "selected_surface": "indoor"
+  },
+  "binary_layout": {
+    "header_bytes": 48,
+    "samples_block_offset": 48,
+    "mag_g_offset": 48,
+    "mag_hp_offset": 14904,
+    "mag_lp_offset": 29760,
+    "motion_mask_offset": 44616,
+    "peaks_offset": 48332,
+    "peak_record_bytes": 20,
+    "total_bytes": 48332
+  },
+  "algo_version": "0.6.0-algo-v1",
+  "algo_params_git_sha": "8008c5021cfa (dirty)",
+  "generated_utc": "2026-04-25T22:54:52+00:00"
+}
