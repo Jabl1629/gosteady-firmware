@@ -26,6 +26,7 @@
 
 #include "session.h"
 #include "dump.h"
+#include "cellular.h"
 
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
@@ -356,6 +357,13 @@ int main(void)
 	/* Bring up the host-facing dump channel on uart1. */
 	if (gosteady_dump_start() < 0) {
 		LOG_WRN("dump channel failed to start — file pull disabled");
+	}
+
+	/* M12.1a: kick off async LTE-M attach. Non-blocking — registration
+	 * completes asynchronously; cellular.c logs state changes + signal
+	 * stats + network UTC. No MQTT yet. */
+	if (gosteady_cellular_start() < 0) {
+		LOG_WRN("cellular bring-up failed — proceeding without modem");
 	}
 
 	LOG_INF("Bring-up complete. Press SW0 to start/stop a session.");

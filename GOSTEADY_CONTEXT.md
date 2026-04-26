@@ -178,6 +178,7 @@ The repo is at a **BLE-controllable session-logging target with closed-loop POST
 - **M9 Phase 4 (cross-surface validation + auto-surface architecture, 2026-04-25):** Captured the outdoor concrete sidewalk segment (8 walks + 1 stationary baseline; s-curve skipped per spacing constraints), then re-ran the algorithm across both surfaces. **Three universal findings**: (a) detector behaves identically across surfaces (detected/manual ratio ≈1.5× on both — same compound-impulse signature); (b) stride lengths essentially identical (median 1.43 indoor / 1.39 outdoor ft/step — same gait); (c) walking signal σ ~1.93× higher outdoor (texture-induced impulse energy). **One critical surface-specific finding**: the slow-vs-fast amplitude relationship *inverts* outdoors — slow walks have the *biggest* σ (1.04 g) because slower wheel motion gives more dwell time per surface irregularity. Indoor coefficients applied to outdoor data without surface info hit 90.3% MAPE — surface info is non-optional for v1. **Architecture decision (2026-04-25): auto-surface roughness adjustment.** The firmware computes a session-level **motion-gated inter-peak RMS** as a continuous roughness metric R, then auto-classifies the session into a surface-coefficient bucket. Operator does NOT pick the surface — the algorithm self-calibrates from the IMU stream. With n=16 walks across two surfaces, hard threshold τ=0.245 hits **22.4% pooled MAPE (15/16 walks correctly classified)**. Per-surface operator-supplied baseline is 16.4% / 23.3%; auto-surface costs ~2.5 percentage points pooled vs operator-supplied, with the gap concentrated on a single boundary case (outdoor run 17, R=0.219). Expected to close at v1.5 with carpet captures + more data per surface widening the R distribution gaps. See `algo/run_auto_surface.py`, `algo/run_roughness_experiment.py`, `algo/run_cross_surface.py`, `algo/run_summary.py`, and `algo/roughness.py` for the full experiment ladder.
 - **HardFault on STOP fixed (2026-04-25, commit `81ddb11`):** Symptom — first encountered as `← FATAL ERROR: HardFault` over BLE on a STOP, after 7 outdoor capture attempts. uart0 firmware-side logging (added the same morning) showed every session's close path emitting `<err> writer fs_write -9/1792` even on clean closes — `-EBADF` on the writer's batch flush. Root cause: in `gosteady_session_stop()` the order was `raise(stop_signal); k_sem_take(stop_done_sem); s_active=false`, which let the sampler keep enqueueing after the writer had already closed the file (window between writer ack and `s_active` flip). Sampler enqueues → writer wakes → drains samples that pass the now-stale `s_active` check → batch fills → `fs_write` against closed file. Most of the time the failure is benign (logged error, file already had its header); at 2026-04-23 09:53:49 the same race landed in a use-after-free path inside LittleFS and HardFaulted. Fix: move `s_active = false` to **before** raising `stop_signal`, mirroring `session_start`'s structure where `s_active = true` is set only after the writer has acked and the file is open. Verified across 4 stress-test START/STOP cycles (8 s, 2 s, 1 s, 1 s rapid back-to-back) — zero `-EBADF` errors. Pairs symmetrically with the 2026-04-22 start-side handshake.
 - **Logging infrastructure (2026-04-25, commit `00e6ed4`):** `tools/log_console.py` is a continuous uart0 console logger that auto-saves to `logs/uart0_YYYY-MM-DD.log` with timestamped lines, auto-reconnects across power cycles, and captures every session boundary + base64 header + Zephyr fault dump that would otherwise vanish from a screen session. uart0 is one-way (firmware → host) so it never conflicts with `pull_sessions` / `control` / `cleanup_device`. `tools/capture.html` got **three-tier log persistence**: DOM (last 80 entries shown), localStorage (full buffer up to 10000 entries, restored on page load), and disk auto-export on `FATAL` / `HardFault` patterns + manual "Export Log" / "Clear Log" footer buttons. POST-WALK notes are still a separate localStorage key with their own "Export capture notes (JSON)" button — the export-everything-in-one-button consolidation is a follow-up.
+- **M12.1a (cellular bring-up, 2026-04-26):** First cut of `src/cellular.{h,c}` — drives `nrf_modem_lib` + LTE link control + `nrf_modem_at` to attach to LTE-M, then reports RSRP/SNR + UTC time once registered. Pure bring-up: no MQTT, no sockets, no telemetry yet. `prj.conf` adds `CONFIG_NRF_MODEM_LIB=y` + `CONFIG_LTE_LINK_CONTROL=y` + `CONFIG_LTE_LC_PSM_MODULE=y` + `_EDRX_MODULE` + `_CONN_EVAL_MODULE`. Reporter thread polls `AT+CESQ` for RSRP, `AT%XSNRSQ?` for SNR (Nordic-modem extension), `AT+CCLK?` for network UTC. **Bench result on first try:** modem registered as `roaming` in **6.0 s** from boot (Nordic Onomondo SIM on local LTE-M carrier), `psm: tau=3240 s, active=-1 s` (54 min sleep negotiated; active timer rejected), `rsrp=-100 dBm snr=2 dB`, `network_time=2026-04-26T17:58:14Z`. PSM `active=-1` is benign — the modem reports the network's response and -1 means "network didn't grant the active timer we asked for"; PSM still works, the modem just transitions immediately. M5/M6/M7/M10 paths untouched: `littlefs_storage` partition unchanged at `0x4d2000-0xcd2000`, boot_count incremented cleanly, BMI270 + ADXL367 still sampling. Outstanding nit: first signal/time poll fired at uptime 1:12 instead of registration+5s as coded — reporter thread's first iteration is delayed by something (possibly `nrf_modem_at_scanf` blocking on the AT+CESQ call until RRC has fully settled). Not blocking; will refine cadence when M12.1c heartbeat publish lands.
 
 The repo is public on GitHub at `https://github.com/Jabl1629/gosteady-firmware` and also serves the operator UI via GitHub Pages at **`https://jabl1629.github.io/gosteady-firmware/tools/capture.html`** (auto-rebuilds on every push to `main`).
 
@@ -194,6 +195,7 @@ gosteady-firmware/
 │   ├── session.h/c                   # Session file format + lifecycle (start/append/stop), msgq + writer thread
 │   ├── dump.h/c                      # uart1 line protocol (LIST/DUMP/DEL/PING)
 │   ├── control.h/c                   # Transport-agnostic START/STOP/STATUS JSON parser
+│   ├── cellular.h/c                  # M12.1a: nrf_modem_lib + LTE attach + AT+CCLK?/AT+CESQ reporter
 │   └── algo/                         # ** M10 on-device V1 distance estimator (DONE 2026-04-25) **
 │       ├── gosteady_algo_params.h    # Auto-generated from algo/export_c_header.py — DO NOT EDIT
 │       ├── gs_filters.h/c            # DF-II-T biquad cascade (CMSIS-DSP layout)
@@ -284,7 +286,7 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
 10. **C port** — move the estimator on-device. *(done 2026-04-25 — `src/algo/{gs_filters,gs_motion_gate,gs_step_detector,gs_roughness,gs_pipeline}.h/c` + auto-generated `gosteady_algo_params.h`. Wired into `src/session.c` writer thread; emits two `ALGO_V1{A,B}` log lines at session close with distance_ft, R, surface_class, step_count, motion_s, total_s, motion_frac, overflow flag. Host regression suite (`tests/host/`, `make`-driven, no Zephyr/CMSIS dep) runs against the three M10 reference vectors and passes 31/31 checks within float32-vs-float64 tolerance. Firmware version bumped to `0.6.0-algo`. Stationary on-device validation passes (0 steps / 0 ft / NaN R, exactly mirroring `indoor_run09` fixture). Walking-path on-device validation **passes** (2026-04-25 ~18 s real walk: 12 peaks / R=0.056 / surface=indoor / distance=4.99 ft / motion_frac=43%; cadence 0.66 Hz matches characterized 0.4–0.7 Hz gait band; firmware_version=`0.6.0-algo` stamped in the pulled session header).)*
 10.5. **Field deployment requirements** — define the firmware capability set + cloud contract for the first remote deployment (3 Thingy:91 X units, rehab clinic, ~1 month, cellular only, no charging, no OTA, no user interaction). Drives M11–M14 sequencing. *(active in parallel with M10 — see "Field Deployment (M10.5)" section + "Portal Scope Impact" section.)*
 11. **Validation** — hold-out error characterization. (Algorithm-side: re-run cross-surface LOO with M10 C outputs from reference vectors; deployment-side: continuous in-field comparison against any clinic-supplied ground truth.)
-12. **Cellular** — LTE-M / NB-IoT link up on nRF9151. (Scoped by M10.5: MQTT/TLS to AWS IoT Core, hourly heartbeat, session-end activity uplink, opportunistic snippet flush.)
+12. **Cellular** — LTE-M / NB-IoT link up on nRF9151. (Scoped by M10.5: MQTT/TLS to AWS IoT Core, hourly heartbeat, session-end activity uplink, opportunistic snippet flush. Sub-milestones: **M12.1a (modem attach + signal stats + AT+CCLK? time) DONE 2026-04-26**; M12.1b (refine reporter cadence + PSM enter/exit logging) deferred until 1c lands; **M12.1c — MQTT/TLS to AWS IoT Core + first heartbeat publish to `gs/{serial}/heartbeat`**, requires per-device cert provisioning into the nRF9151 modem (sec_tag 16842753-style flow); M12.1d — activity uplink on session close; M12.1e — pre-activation gate + `gs/{serial}/cmd` activation downlink; M12.1f — snippet uplink on `gs/{serial}/snippet` once snippet capture path lands.)
 13. **Cloud backend** — session telemetry upload. (Coordinated with portal Phase 1A/1B — already specified; firmware-side work is the on-device side of the contract.)
 14. **Production telemetry** — battery (nPM1300 fuel gauge), error/fault counters, OTA hooks. (M10.5 defines what's required vs. nice-to-have for first deployment.)
 15. **Field testing.**
@@ -640,9 +642,15 @@ Repartition is a one-time partition-manager change in `pm_static.yml`; needs `-p
 
 ## Portal Scope Impact
 
-This section is the **firmware ↔ portal coordination ledger**. Every contract decision between firmware and the GoSteady portal lives here so both sides have a single source of truth. Updated whenever a contract or behavior is agreed, deferred, or changed.
+This section is the **firmware-side reference snapshot of the contract tables** between firmware and the GoSteady portal. As of 2026-04-26, the **canonical cross-team conversation record** lives in the shared portal repo, not here:
 
-Source documents on the portal side: `~/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/gosteady-portal/docs/specs/` — `ARCHITECTURE.md`, `phase-1a-ingestion.md`, `phase-1b-processing.md`, `phase-2a-device-lifecycle.md`. Re-read those when planning anything portal-touching; they're the authoritative spec on the cloud side.
+> **Shared coordination doc:** `gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md`
+> Local mirror: `~/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md`
+> GitHub: `https://github.com/Jabl1629/GoSteadyPortal/blob/feature/infra-scaffold/docs/firmware-coordination/2026-04-17-cloud-contracts.md`
+
+That doc is **append-only conversation style**: each team writes a dated, signed entry; nobody edits another team's entries. Use it for: (a) responding to a question raised by the other team, (b) raising a new contract question, (c) announcing a new firmware milestone or cloud capability the other side needs to know about, (d) flagging a deferred decision back open. The tables below are the firmware-side cached view of locked contracts — useful for a glance while writing firmware code, but if there's a discrepancy with the shared doc, **the shared doc wins**.
+
+Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/gosteady-portal/docs/specs/` — `ARCHITECTURE.md`, `phase-1a-ingestion.md`, `phase-1a-revision.md`, `phase-1b-processing.md`, `phase-2a-device-lifecycle.md`. Re-read those when planning anything portal-touching; they're the underlying spec the shared coordination doc is reconciling.
 
 ### Identity & provisioning (FIRST DEPLOYMENT)
 
@@ -653,13 +661,19 @@ Source documents on the portal side: `~/Library/Mobile Documents/com~apple~Cloud
 | Auth (post-first-deployment) | AWS IoT Fleet Provisioning with claim cert at flash time + CSR exchange on first boot | Deferred to portal Phase 5A coordination |
 | First-boot binding | Cloud-side state machine: `ready_to_provision` → `provisioned` → `active_monitoring` driven by first-heartbeat | Portal-side; no firmware action beyond "send heartbeat normally" |
 
-### Pre-activation behavior (NEW — needs portal-side spec)
+### Pre-activation behavior
 
 | Item | Decision | Status |
 |---|---|---|
-| Firmware behavior pre-activation | No session capture. Wake on motion → connect → publish heartbeat → wait for activation message → if absent, return to sleep. | **Locked firmware-side 2026-04-25** |
-| Visual indicator | Blue LED slow-blink (1 Hz, 100 ms on / 900 ms off) while in `ready_to_provision` state. LED extinguishes once activation message received. | **Locked firmware-side 2026-04-25** |
-| Activation message contract | **OPEN** — portal needs to define: topic, payload schema, what counts as "activation acknowledged" by the firmware (just receipt? receipt + state-write to flash? specific message field?). | **Coordination needed with portal team** |
+| Firmware behavior pre-activation | No session capture. Wake on motion → connect → publish heartbeat → wait for activation cmd → if absent, return to sleep. | **Locked firmware-side 2026-04-25** |
+| Visual indicator | Blue LED slow-blink (1 Hz, 100 ms on / 900 ms off) while in `ready_to_provision`. Extinguishes once activation cmd received. **Purely firmware-side** — no cloud "show LED" command; firmware self-extinguishes. Driven by the firmware's local view of provisioning state, which it confirms with the cloud at every cellular wake. | **Locked 2026-04-25** |
+| Activation cmd topic | `gs/{serial}/cmd` (downlink, cloud → device). Per-thing IoT policy authorizes each device to subscribe only to its own `cmd` topic. | **Locked 2026-04-17 (portal)** |
+| Activation cmd payload | `{"cmd":"activate","cmd_id":"act_<uuid>","ts":"<ISO8601>","session_id":"<provision audit ID>"}` | **Locked 2026-04-17 (portal)** |
+| When cloud sends it | Synchronously, when a caregiver successfully provisions the device for the first time via portal API. State machine: `ready_to_provision → provisioned`. | **Locked 2026-04-17 (portal)** |
+| Firmware behavior on receipt | (1) persist `activated_at` to flash; (2) exit pre-activation sleep loop; (3) extinguish blue LED; (4) begin normal session capture; (5) echo `cmd_id` back via `last_cmd_id` field on next heartbeat. | **Locked 2026-04-17** |
+| Ack semantics | Heartbeat-side `last_cmd_id` echo IS the ack. Cloud's heartbeat handler matches it against most-recent issued `activate` cmd → marks `Device Registry.activated_at` and emits `device.activated` audit event. | **Locked 2026-04-17 (portal)** |
+| Pre-activation heartbeats | Cloud accepts them, updates Device Shadow normally, **suppresses synthetic alerts** until `activated_at` is set (no patient → no caregiver → all alerts are noise). Sampled audit log at 1/hr/serial. Firmware can publish freely without producing user-facing noise. | **Locked 2026-04-17 (portal)** |
+| Failure modes | Cloud publish fails → portal returns 500 to caregiver; provision is idempotent so retry republishes a fresh `cmd_id`. Firmware never echoes → cloud surfaces "stuck in `provisioned` >24h" via ops alarm. | **Locked 2026-04-17 (portal)** |
 
 ### Transport & topics
 
@@ -669,7 +683,8 @@ Source documents on the portal side: `~/Library/Mobile Documents/com~apple~Cloud
 | Heartbeat topic | `gs/{serial}/heartbeat` | Locked by portal spec |
 | Activity topic | `gs/{serial}/activity` | Locked by portal spec |
 | Alert topic | `gs/{serial}/alert` (firmware does NOT publish in first deployment — see Anti-features above) | Channel exists; firmware deferred |
-| Downlink / `cmd` topic | Not used in first deployment. Portal Phase 1A "Open Questions" list this as TBD. | **Not needed for first deployment** |
+| Snippet topic | `gs/{serial}/snippet` (uplink, binary payload up to 100 KB). | **Locked 2026-04-17 (portal)** |
+| Downlink / `cmd` topic | `gs/{serial}/cmd` — used in v1 for the **activation cmd only**. Firmware subscribes during pre-activation, unsubscribes (or ignores further messages) after activation. No other downlink commands in first deployment. | **Locked 2026-04-17** |
 
 ### Heartbeat uplink
 
@@ -678,8 +693,8 @@ Source documents on the portal side: `~/Library/Mobile Documents/com~apple~Cloud
 | Cadence | 1 hr | **Locked 2026-04-25** — accepting tight battery budget; measure actual life as deployment outcome |
 | Cloud offline-detection threshold | > 2 hr without heartbeat → device marked offline | Locked by portal spec |
 | Required payload fields | `serial`, `ts` (ISO 8601 UTC), `battery_pct` (0.0–1.0), `rsrp_dbm` (−140 to 0), `snr_db` (−20 to 40) | Locked by portal spec |
-| Optional payload fields | `battery_mv`, `firmware` (semver string), `uptime_s` | Locked by portal spec |
-| Firmware-added (non-portal-spec) fields | `reset_reason`, `fault_counters{...}`, `watchdog_hits` — for crash forensics. **Portal must accept extra fields gracefully OR ignore them.** | **Coordination needed** |
+| Optional payload fields | `battery_mv`, `firmware` (semver string), `uptime_s`, `last_cmd_id` (echoes most-recent downlink cmd — used for activation ack), `reset_reason`, `fault_counters` (object), `watchdog_hits` (int) | **Locked 2026-04-17 (portal)** — all formerly "firmware-added" extras now explicitly listed in `ARCHITECTURE.md §7` |
+| Cloud handling of unknown fields | **Accept-all**: any unknown field is persisted to Device Shadow `reported` state alongside named fields. Validation rejects only on missing required fields or out-of-range required values. Crash-forensics extras are queryable via Shadow. | **Locked 2026-04-17 (portal)** |
 | Storage in cloud | AWS IoT Device Shadow `reported` state (not DynamoDB direct write) | Locked by portal spec |
 
 ### Activity uplink
@@ -688,7 +703,7 @@ Source documents on the portal side: `~/Library/Mobile Documents/com~apple~Cloud
 |---|---|---|
 | Trigger | On session close (after on-device M10 algorithm computes outputs) | Locked firmware-side |
 | Required payload fields | `serial`, `session_start` (ISO 8601), `session_end` (ISO 8601), `steps` (int 0–100,000), `distance_ft` (number 0–50,000), `active_min` (int 0–1,440) | Locked by portal spec |
-| Firmware-derived extras to propose | `roughness_R` (float), `surface_class` (`indoor`/`outdoor` per M9 classifier), `firmware_version` | **Coordination needed — propose addition to portal contract** |
+| Optional payload fields | `roughness_R` (float), `surface_class` (`indoor` \| `outdoor` — M9 classifier), `firmware_version` (semver). Other unknown fields land in a per-row `extras` map on the Activity Series DDB row. | **Locked 2026-04-17 (portal)** — all three firmware-derived extras added to schema in `ARCHITECTURE.md §7` |
 | Idempotency | `(serial, session_end)` — firmware retries are safe | Locked by portal spec |
 | Patient attribution | Post-hoc, cloud-side, by `serial` → DeviceAssignment lookup. Firmware does NOT receive or send `patient_id`. | Locked by portal spec |
 
@@ -704,10 +719,18 @@ Source documents on the portal side: `~/Library/Mobile Documents/com~apple~Cloud
 
 | Item | Decision | Status |
 |---|---|---|
-| Portal spec coverage | Silent — no contract for snippet upload in Phase 1 | — |
-| First-deployment plan | Firmware-side only. Stored on flash, retrieved via USB on device return. | **Locked 2026-04-25** |
+| Portal spec coverage | Resolved 2026-04-17 — covered by `phase-1a-revision.md` snippet IoT Rule | **Locked 2026-04-17 (portal)** |
+| First-deployment plan | MQTT direct publish, opportunistic. Flash retention as belt-and-suspenders for USB retrieval on device return. | **Locked 2026-04-17** |
 | Opportunistic upload | Firmware piggybacks snippet upload on cellular wakes opened for Priority-1 publishes. See Snippet Upload Policy in M10.5 section. | **Locked 2026-04-25 firmware-side** |
-| Snippet upload schema | **OPEN** — when/if upload path is added, need cloud endpoint + payload schema + retention policy. | **Coordination needed** |
+| Topic | `gs/{serial}/snippet` (uplink) | **Locked 2026-04-17 (portal)** |
+| Payload | Binary — raw 100 Hz BMI270 IMU samples for a 30 s window (~84 KB typical, 100 KB max). | **Locked 2026-04-17 (portal)** |
+| MQTT user properties (required) | `snippet_id` (firmware-generated UUID for idempotency), `window_start_ts` (ISO 8601 UTC) | **Locked 2026-04-17 (portal)** |
+| MQTT user properties (optional) | `anomaly_trigger ∈ {session_sigma, R_outlier, high_g}`. Absent for scheduled snippets. | **Locked 2026-04-17 (portal)** |
+| MQTT version assumption | Cloud spec assumes MQTT 5 user properties. **Verify NCS MQTT client support** — if only 3.1.1, fall back to small JSON header inside the binary payload. | **Action item** (firmware side) |
+| Cloud routing | IoT Rule with direct S3 action — no Lambda. Lands at `s3://gosteady-{env}-snippets/{serial}/{date}/{snippet_id}.bin`. AWS-managed SSE encryption. | **Locked 2026-04-17 (portal)** |
+| Retention | 90 days hot Standard → Glacier; 13-month total before delete (aligned with v1.5 retrain need). | **Locked 2026-04-17 (portal)** |
+| Audit | Every upload generates a `device.snippet_uploaded` event. | **Locked 2026-04-17 (portal)** |
+| v2 migration heads-up | If snippet size exceeds 100 KB later (longer windows, multi-sensor), switch to S3 presigned-URL flow (same pattern as OTA). MQTT topic deprecates then. **No v1 changes anticipated.** | Informational |
 
 ### OTA
 
@@ -721,9 +744,11 @@ Source documents on the portal side: `~/Library/Mobile Documents/com~apple~Cloud
 
 | Item | Decision | Status |
 |---|---|---|
-| Mechanism | Cellular network time via `AT+CCLK?` on each modem attach | **Locked firmware-side 2026-04-25** — portal spec is silent |
-| Acceptable accuracy | ~seconds for ISO 8601 timestamps in payloads | Inferred from portal payload semantics |
-| Fallback | None in v1 (no NTP, no RTC battery backup) | **Locked firmware-side** |
+| Mechanism | Cellular network time via `AT+CCLK?` on each modem attach | **Locked firmware-side 2026-04-25** — portal confirmed device-authoritative posture 2026-04-17 |
+| Cloud trust contract | Timestamps are device-authoritative. Cloud accepts ISO 8601 strings as-is, no NTP fallback or cloud-side time correction in v1. Validation rejects only unparseable ISO 8601; clock skew or seconds-level drift is accepted. | **Locked 2026-04-17 (portal)** |
+| Acceptable accuracy | ~seconds for ISO 8601 timestamps in payloads (hourly heartbeats, session-end activity, 2-hour offline detection are not sub-second sensitive) | **Locked 2026-04-17** |
+| Empirical bench validation | M12.1a end-to-end on 2026-04-26: LTE-M attach in 6 s on roaming, NITZ-derived UTC parsed cleanly out of `AT+CCLK?` and stamped into `cellular: network_time=2026-04-26T17:58:14Z`. Mechanism works on first try. | **Verified 2026-04-26 (firmware)** |
+| Fallback | None in v1 (no NTP, no RTC battery backup). v2 revisits if a use case requires sub-second precision. | **Locked firmware-side** |
 
 ### Configuration management (no downlink in v1)
 
@@ -734,12 +759,13 @@ Source documents on the portal side: `~/Library/Mobile Documents/com~apple~Cloud
 
 ### Open coordination items
 
-These need portal-team conversation before site-survey unit ships:
+**Moved to the shared coordination doc 2026-04-26.** See `gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md` (and any subsequent dated entries below it) for the live conversation record. The append-only convention means every dated entry stays as a permanent record — search the file for the latest entry from each team to see current status.
 
-1. **Activation message contract** — topic, schema, ack semantics. Blocks pre-activation gate verification.
-2. **Heartbeat extra fields** — confirm portal accepts (or gracefully ignores) `reset_reason`, `fault_counters`, `watchdog_hits` extension. Without this, crash forensics is USB-retrieval-only and we lose mid-deployment visibility.
-3. **Activity extra fields** — propose `roughness_R`, `surface_class`, `firmware_version` additions. These are useful for portal-side anomaly dashboards and v1.5 retrain triage.
-4. **Site-survey unit timeline** — when does first unit ship to the clinic for cellular + battery shakedown ahead of the 2-unit main deployment?
+Brief current state (full detail in the shared doc):
+
+- All four items the portal team flagged on 2026-04-17 (activation contract, heartbeat extras, activity extras, snippet upload schema) — **resolved** in their 2026-04-17 entry; firmware acknowledged in the 2026-04-26 entry.
+- Cloud team's 6 action items for firmware (last_cmd_id ack, MQTT 5 user properties, snippet binary layout, site-survey timeline, pre-activation LED, serial number enrollment) — **all six answered firmware-side in the 2026-04-26 entry**.
+- New firmware-team questions pending cloud response (cert provisioning workflow, AWS IoT endpoint URL + Root CA confirmation, starting serial range, pre-activation cmd-listen-window contract, snippet payload encryption posture) — **logged in the 2026-04-26 entry**, awaiting portal response.
 
 ---
 
