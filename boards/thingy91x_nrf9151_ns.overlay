@@ -17,6 +17,14 @@
 
 &accel {
 	status = "okay";
+	/*
+	 * Phase 1a (M14-prep) wake-on-motion: route the chip's INT1 line
+	 * to P0.11 so the Zephyr ADXL367 driver can register a trigger
+	 * callback. Pin / polarity match the GoSteady context note
+	 * ("INT1 P0.11 active-high"). Without this property the trigger
+	 * Kconfigs (CONFIG_ADXL367_TRIGGER_*) won't compile in.
+	 */
+	int1-gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
 };
 
 /*
