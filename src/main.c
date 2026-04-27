@@ -101,6 +101,30 @@ static const struct gosteady_prewalk BENCH_PREWALK = {
 	.operator_id          = "bench",
 };
 
+/* Phase 5: deployment-mode pre-walk metadata. Per the M10.5 spec
+ * patient attribution is post-hoc cloud-side via DeviceAssignment
+ * lookup on `serial`, so the firmware never knows or stamps a
+ * patient identity. The PRE-WALK fields the bench operator fills
+ * via capture.html become deployment placeholders here, and the
+ * cloud-side ingestion treats them as constants. */
+static const struct gosteady_prewalk FIELD_PREWALK = {
+	.subject_id           = "deployed",
+	.walker_type          = GS_WALKER_TWO_WHEEL,
+	.cap_type             = GS_CAP_GLIDE,
+	.walker_model         = "unspecified",
+	.mount_config         = GS_MOUNT_FRONT_LEFT_LEG,
+	.course_id            = "field",
+	.intended_distance_ft = 0,
+	.surface              = GS_SURFACE_POLISHED_CONCRETE,  /* placeholder; auto-surface classifier overrides */
+	.intended_speed       = GS_SPEED_NORMAL,
+	.direction            = GS_DIR_STRAIGHT,
+	.run_type             = GS_RUN_NORMAL,
+	.operator_id          = "auto",
+};
+
+#define ACTIVE_PREWALK \
+	(IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE) ? &FIELD_PREWALK : &BENCH_PREWALK)
+
 /* ---- LittleFS mount (unchanged from M3) ---- */
 FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(lfs_data);
 static struct fs_mount_t lfs_mnt = {
@@ -129,6 +153,14 @@ static int configure_led(const struct gpio_dt_spec *led, const char *name)
  * caller handles the purple blink via toggles in the main loop. */
 static void led_set_recording(bool recording)
 {
+	/* Phase 5: deployment-mode firmware shows no LEDs in normal
+	 * operation per the M10.5 anti-features list. Only the M12.1e
+	 * pre-activation blue LED is allowed. Skip the recording LED
+	 * entirely in field builds — the chip stays dark while
+	 * sessions auto-capture. */
+	if (IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
+		return;
+	}
 	if (recording) {
 		(void)gpio_pin_set_dt(&led_red,   0);
 		(void)gpio_pin_set_dt(&led_green, 1);
@@ -539,7 +571,7 @@ static void auto_start_entry(void *p1, void *p2, void *p3)
 		if (sigma > AUTO_START_SIGMA_THR_G) {
 			LOG_INF("auto-start: motion CONFIRMED (σ=%.4f g, peak=%.3f g, n=%d) → opening session",
 				(double)sigma, (double)peak_dev, n);
-			int ret = gosteady_session_start(&BENCH_PREWALK);
+			int ret = gosteady_session_start(ACTIVE_PREWALK);
 			if (ret == 0) {
 				led_set_recording(true);
 				/* Session is now active — sampler thread's
@@ -582,7 +614,7 @@ static void handle_button_press(void)
 			LOG_ERR("session_stop failed (%d)", ret);
 		}
 	} else {
-		int ret = gosteady_session_start(&BENCH_PREWALK);
+		int ret = gosteady_session_start(ACTIVE_PREWALK);
 		if (ret < 0) {
 			LOG_ERR("session_start failed (%d)", ret);
 			return;
@@ -852,7 +884,12 @@ int main(void)
 	if (bmi270_set_active(false) == 0) {
 		LOG_INF("bmi270: suspended at boot (idle until session start)");
 	}
-	if ((ret = configure_button()) < 0) { return ret; }
+	if (!IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
+		/* Phase 5: SW0 is bench-only. Field deployments capture
+		 * sessions exclusively via Phase 2 motion-triggered
+		 * auto-start, so don't bother wiring the button. */
+		if ((ret = configure_button()) < 0) { return ret; }
+	}
 	/* Phase 1a: arm the ADXL367 wake-on-motion path. Failure is
 	 * non-fatal — the M2-era 1Hz sanity poll is gone, but motion-
 	 * triggered auto-start in later phases needs this. */
@@ -898,9 +935,16 @@ int main(void)
 			6, 0, K_NO_WAIT);
 	k_thread_name_set(&auto_start_thread, "auto_start");
 
-	/* Bring up the host-facing dump channel on uart1. */
-	if (gosteady_dump_start() < 0) {
-		LOG_WRN("dump channel failed to start — file pull disabled");
+	if (!IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
+		/* Phase 5: uart1 dump channel is bench-only. Skipping in
+		 * field mode also gates off the BLE NUS START path, since
+		 * the bridge tunnels NUS RX into the same uart1 stream
+		 * our dump channel listens on. M12.1e activation cmd
+		 * arrives via cellular MQTT, not BLE, so this is the
+		 * right gate. */
+		if (gosteady_dump_start() < 0) {
+			LOG_WRN("dump channel failed to start — file pull disabled");
+		}
 	}
 
 	/* M12.1a: kick off async LTE-M attach. Non-blocking — registration
@@ -910,20 +954,34 @@ int main(void)
 		LOG_WRN("cellular bring-up failed — proceeding without modem");
 	}
 
-	LOG_INF("Bring-up complete. Press SW0 to start/stop a session.");
+	LOG_INF("Bring-up complete. %s",
+		IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE) ?
+		"FIELD_MODE: motion-driven autonomous capture only." :
+		"Press SW0 to start/stop a session.");
 
 	while (1) {
-		/* Consume any pending button presses non-blockingly. */
+		/* Consume any pending button presses non-blockingly.
+		 * In FIELD_MODE the button isn't wired so the sem never
+		 * gets given — the take returns -EAGAIN and we move on.
+		 * (Cheaper to leave the no-op call than to gate the
+		 * conditional, since k_sem_take with K_NO_WAIT is a
+		 * fast path.) */
 		if (k_sem_take(&button_press_sem, K_NO_WAIT) == 0) {
 			handle_button_press();
 		}
 
 		if (!gosteady_session_is_active()) {
-			/* Idle: purple blink (red+blue toggle), 1 Hz heartbeat log. */
-			gpio_pin_toggle_dt(&led_red);
-			gpio_pin_toggle_dt(&led_blue);
-			LOG_INF("heartbeat tick=%u", tick++);
-			log_adxl367_motion_counts();
+			if (!IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
+				/* Bench: purple blink (red+blue toggle),
+				 * 1 Hz heartbeat log + motion-counter
+				 * delta. All silenced in FIELD_MODE per
+				 * M10.5 "no LEDs / minimal log noise"
+				 * deployment posture. */
+				gpio_pin_toggle_dt(&led_red);
+				gpio_pin_toggle_dt(&led_blue);
+				LOG_INF("heartbeat tick=%u", tick++);
+				log_adxl367_motion_counts();
+			}
 		} else {
 			/* Phase 3 auto-stop: end the session after the M9
 			 * motion gate has confirmed AUTO_STOP_STATIONARY_S

@@ -1,0 +1,40 @@
+# GoSteady firmware Kconfig — project-local symbols.
+#
+# Imports the standard Zephyr Kconfig tree first, then adds GoSteady-
+# specific switches. Set values in prj.conf (always-on bench config)
+# or in an overlay like prj_field.conf (deployment).
+
+mainmenu "GoSteady firmware configuration"
+
+source "Kconfig.zephyr"
+
+menu "GoSteady"
+
+config GOSTEADY_FIELD_MODE
+	bool "Build for deployment (field) mode"
+	default n
+	help
+	  When enabled, the firmware is built for unattended deployment
+	  operation per the M10.5 spec:
+
+	    - SW0 button handler is disabled (no manual session start).
+	    - uart1 dump channel is not started (and with it, the BLE NUS
+	      tunnel that piggybacks on uart1 from the bridge — `START`
+	      from capture.html no longer routes to a session-start path).
+	    - LED heartbeat tick (purple blink) is silenced. Recording-
+	      time green LED is also silenced. Only the M12.1e pre-
+	      activation blue LED remains in deployment.
+	    - Heartbeat log line on uart0 is silenced.
+	    - Auto-start uses FIELD_PREWALK (subject_id="deployed",
+	      course_id="field", etc.) instead of the bench placeholders;
+	      patient attribution is cloud-side per portal contract.
+
+	  Pure motion-driven autonomous capture: ADXL367 wake-on-motion
+	  → BMI270 confirmation → session → M9-motion-gate auto-stop.
+
+	  Default off so bench builds keep all existing tooling. Build
+	  the deployment image with:
+
+	    west build -b thingy91x/nrf9151/ns -- -DEXTRA_CONF_FILE=prj_field.conf
+
+endmenu
