@@ -656,6 +656,8 @@ Repartition is a one-time partition-manager change in `pm_static.yml`; needs `-p
 
 ## Portal Scope Impact
 
+> **Meta context for future sessions:** GoSteady is a one-developer project (Jace) at this point. The "firmware team" and "cloud team" you'll see in the shared coordination doc are **both Jace working with Claude in two parallel sessions** — one focused on this firmware repo, one focused on `gosteady-portal`. The append-only convention isn't really about cross-team etiquette; it's because each Claude session only sees its own repo's history, so the shared doc is the only place both sessions reliably read the other's decisions. Treat coordination items as self-managed: "waiting on cloud team to deliver X" really means "switch back to the other Claude session and have it deliver X." Cert handoffs, shadow registry rows, etc. are minutes away whenever firmware needs them.
+
 This section is the **firmware-side reference snapshot of the contract tables** between firmware and the GoSteady portal. As of 2026-04-26, the **canonical cross-team conversation record** lives in the shared portal repo, not here:
 
 > **Shared coordination doc:** `gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md`
@@ -820,93 +822,92 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 
 ## Immediate Next Steps
 
-The M9 algorithm architecture is locked as of 2026-04-25 (auto-surface roughness adjustment, 22.4% pooled MAPE LOO at n=16). The user has explicitly chosen to **proceed to M10+ now** rather than wait for the carpet captures to finish — the v1 algorithm ships with auto-surface from the start, and v1.5 retrains coefficients with more data later. M10 (C port) and M10.5 (deployment requirements + portal coordination) run in parallel; M11–M14 are scoped by what M10.5 lands on.
+### Where the project stands (2026-04-27)
 
-### Track A — M10 (C port), DONE 2026-04-25
+A two-day sprint shipped the entire **M14-prep power architecture** (Phases 1a–5) — full deployment-mode autonomous capture works on bench:
 
-The full V1 distance estimator runs on-device. Modules under `src/algo/` (one .h + .c each):
+> walker moves → ADXL367 chip-level activity detection fires → BMI270 confirmation window (σ > 50 mg gate) → green LED, session opens → walking → walker stops → 15 s of stillness → auto-stop closes session → BMI270 suspends → idle.
 
-- `gs_filters` — DF-II-T biquad cascade. Coefficients in CMSIS-DSP `arm_biquad_cascade_df2T_f32` storage layout (`a1`/`a2` already-negated per CMSIS convention) so the on-device path can later swap to CMSIS-DSP without touching the algo header. Currently uses our own biquad (~25 LoC) — portable to host tests and bit-equivalent.
-- `gs_motion_gate` — running-σ + Schmitt FSM with hysteresis. Fixed 64-sample ring (handles the V1 50-sample / 500ms window with headroom).
-- `gs_step_detector` — Schmitt FSM + per-peak features (amplitude, duration, energy). Mirrors the Python including the off-by-one duration vs energy-sum-includes-exit-sample quirk; tests caught + locked the convention.
-- `gs_roughness` — batch motion-gated inter-peak RMS. Streaming variant deferred — the orchestrator buffers `mag_lp` + `motion_mask` in RAM (12000 sample cap = 120s @ 100Hz, 60 KB) and runs the batch at session close. Sessions exceeding the cap still emit distance/step_count/active_minutes correctly; only `roughness_R` falls back to NaN with `buffer_overflowed=true`.
-- `gs_pipeline` — orchestrator. `init` → `session_start(first_mag_g)` (primes HP filter to steady-state at the first sample's gravity) → `step(mag_g)` per sample → `finalize(&outputs)`. Outputs: `distance_ft`, `roughness_R`, `surface_class`, `step_count`, `motion_duration_s`, `total_duration_s`, `motion_fraction`, `buffer_overflowed`.
+Zero button presses end-to-end. `CONFIG_PM=y` enables System ON Idle (~50 µA) between motion events. `CONFIG_GOSTEADY_FIELD_MODE` Kconfig gates off bench-only paths (SW0, dump UART, heartbeat LEDs) for the deployment build via `prj_field.conf` overlay.
 
-Integration in [src/session.c](src/session.c): the writer thread feeds every persisted sample to `gs_pipeline_step()`. At session stop, after the final `writer_flush` and before the header rewrite, `gs_pipeline_finalize()` runs and the outputs are emitted as two log lines (split because the combined string overflows Zephyr's per-message buffer):
+Cross-team coordination with the cloud-side Claude session (see Portal Scope Impact §meta context) is fully caught up as of 2026-04-26. **All M12.1c blockers are decided** — endpoint URL, root CA, starting serials, cert delivery flow, manufacturer enrollment workflow.
 
-```
-ALGO_V1A uuid=<u> distance_ft=<f> R=<f|nan> surface=<n> steps=<u>
-ALGO_V1B uuid=<u> motion_s=<f> total_s=<f> motion_frac=<f> overflow=<0|1>
-```
+**Done milestones (chronological):** M1–M7 (bench data capture pipeline) → M9 Phase 1–4 (auto-surface algorithm) → M10 (algo C port + on-device walking-path validation) → M10.5 (deployment requirements + portal coordination) → M12.1a (modem attach + AT+CCLK?) → **M14-prep Phase 1a/1b/2/3/4/5** (full power architecture, both build configs).
 
-`prj.conf` adds `CONFIG_CBPRINTF_FP_SUPPORT=y` so `%f` renders actual numbers (without it, the deferred-logging backend prints `*float*`). `firmware_version` in the session header bumped to `0.6.0-algo` so any session captured by this build is unambiguously identifiable. Algo outputs are NOT yet stamped into the 256-byte header's `_reserved[67]` block — that's a follow-up; for now the log line is the canonical channel.
+### Track A — M12.1c first heartbeat publish (highest-leverage next milestone)
 
-**Host regression suite** at [tests/host/](tests/host/): `make` builds the algo .c files + `test_main.c` + `test_loader.c` against the host's compiler (no Zephyr/CMSIS dep), runs the three M10 reference vectors through five test layers (HP, LP, motion gate, step detector, end-to-end pipeline), passes 31/31 checks within float32-vs-float64 tolerance. Tightest result: indoor_run05 distance differs from Python by 0.0007% (14.972 ft on-device vs 14.972 ft Python LOO). Loosest: outdoor_run13 R differs by 0.27% — within expected float32 cumulative roundoff. Per-peak detail is "best-effort match" rather than strict because float32 cumulative noise can shift threshold-crossing peaks ±a-few samples without changing the regression sum.
+The chunky one. ~2-3 days of focused firmware work + a few side-quests.
 
-**On-device validation:** stationary baseline (cap on desk, 8s session) emits `distance_ft=0.00 R=nan surface=0 steps=0 motion_s=0.00` — exactly mirrors the `indoor_run09` fixture's expected output. No `writer fs_write` errors (the 2026-04-25 STOP-race fix held). Walking-path on-device validation is the one outstanding piece — needs a physical "pick up the cap and walk" test to confirm the on-device numbers match what the algo predicts for the same data when run in Python.
+**Foundation prerequisites (do these first; bounded, low-risk, parallel-safe):**
 
-The 19-run dataset (10 indoor + 8 outdoor + 1 outdoor stationary) is enough to ship initial coefficients into the C header. v1.5 regenerates the header from the 30+ run dataset once carpet captures land — the architecture is unchanged across that transition; only `gosteady_algo_params.h` rolls forward.
+1. **Storage repartition (`pm_static.yml`)** — carve the unused 19 MB on external flash (`0xcd2000–0x2000000`) into:
+    - `littlefs_snippets` (~16 MB, second LittleFS instance for snippet ring)
+    - `telemetry_queue` (~256 KB raw flash, persists Priority-1 heartbeat/activity across reboot)
+    - `crash_forensics` (~64 KB raw flash, reset reason + fault counters + last-N log lines + watchdog hits)
+    - reserve ~3 MB free
+   Touches `pm_static.yml` only. Verify boot_count still increments + existing M10 sessions still mount unchanged. **~2-3 hr.** Foundation for crash forensics and snippet upload tracks.
 
-### Track B — Resume M8 captures (runs 21–30 carpet) when convenient
+2. **`device-registry.csv` private companion repo** — per Portal Scope Impact §C.4.5 manufacturer enrollment workflow. Create a private GitHub repo, commit `device-registry.csv` with header `serial, cert_fingerprint, flash_date, firmware_version`. Share read access with cloud-side session. **~5 min.** Cloud team's CLI helper script will pull from here at flash time.
 
-Not blocking M10. Capture-time command sequence (unchanged from before, just execute when the time is right):
+3. **Confirm NCS Shadow lib (§C.5.1)** — small bench test that does `aws_iot_shadow_get` + `aws_iot_shadow_update` against a stub Thing in dev IoT account. Verifies the lib works in NCS 3.2.4. If it doesn't, fallback is MQTT-retained `activate` cmd (cloud team's option-a). **~half-day.** Unblocks M12.1e for later.
+
+**M12.1c heartbeat publish proper (~2-3 days):**
+
+4. **MQTT/TLS bring-up** — Add `CONFIG_NRF_MODEM_LIB=y` already in place; add `CONFIG_AWS_IOT=y` (or bare `CONFIG_MQTT_LIB=y` + roll our own) + TLS sec_tag config. NCS's `aws_iot` lib handles thing-aware topics + Shadow natively, recommended over bare MQTT.
+
+5. **Cert provisioning at flash time** — Small host-side script taking cert + key + serial, writing to modem secure store via `AT%CMNG=0,<sec_tag>,...` over uart1. Runs once per device. The other Claude session generates certs via `aws iot create-keys-and-certificate` whenever firmware is ready to receive them.
+
+6. **Heartbeat payload builder + scheduler** — JSON builder with required fields (`serial`, `ts`, `battery_pct`, `rsrp_dbm`, `snr_db`) + the optional extras already locked (`last_cmd_id`, `reset_reason`, `fault_counters`, `watchdog_hits`, `battery_mv`, `firmware`, `uptime_s`). Hourly timer fires modem wake → publish → return to PSM.
+
+7. **First end-to-end heartbeat** — flash firmware on `GS0000000001`, generate cert in other session, flash cert, watch heartbeat hit cloud Device Shadow. Site-survey-unit-equivalent milestone.
+
+### Track B — Sequential / parallel tracks after M12.1c
+
+Each is its own focused chunk; M12.1c unblocks all of them.
+
+- **nPM1300 fuel gauge wiring** — ~1 day. Fills `battery_pct` and `battery_mv` in heartbeat payload. Currently stamps 0. Better landed before M12.1c so first heartbeat has real data, but post-M12.1c works too.
+- **Crash forensics + watchdog** — ~2 days. Persistent reset reason / fault counters / last-N log lines / watchdog hit counter in the `crash_forensics` partition. Hardware watchdog kicked from a dedicated supervisor thread; fault triggers next-heartbeat surfacing.
+- **M12.1d activity uplink** — ~1 day. Payload builder for `gs/{serial}/activity` on session close. Most plumbing reused from M12.1c.
+- **M12.1e pre-activation gate + Shadow re-check** — ~2 days. Refuses session capture until first cloud activation cmd received. Blue LED slow-blink while in `ready_to_provision`. Shadow `desired.activated_at` re-check on every cellular wake (per cloud §C.4.4). Blocked only on §C.5.1 NCS Shadow lib confirmation.
+- **M12.1f snippet uplink** — ~3 days. Needs storage repartition done. JSON-header framing per §F.3 + binary layout per §F.4 (4-byte BE length-prefix + JSON header + 16-byte payload header + 28-byte sample records). Opportunistic upload piggybacking on Priority-1 cellular wakes per the M10.5 snippet upload policy.
+
+### Track C — Resume M8 captures (carpet runs 21–30) when convenient
+
+Not blocking anything else; the 19-run dataset already in the v1 algorithm coefficients is enough for the deployment build. Useful for v1.5 retrain when convenient. Capture command sequence:
 
 ```bash
 cd ~/Documents/gosteady-firmware
 STAMP=$(date +%F)
 mkdir -p raw_sessions/$STAMP
-
-# Wipe the device so the pull only contains real runs.
 PY=/opt/nordic/ncs/toolchains/185bb0e3b6/bin/python3
 $PY tools/cleanup_device.py --port /dev/cu.usbmodem*1105 --all --yes
-
-# Start the uart0 logger in the background — captures every session start/stop +
-# any fault dumps automatically to logs/uart0_$STAMP.log.
 $PY tools/log_console.py &
-
 # Open https://jabl1629.github.io/gosteady-firmware/tools/capture.html in Chrome,
 # Connect, walk the protocol row by row. Hard-refresh once at the start to pick
 # up any Pages updates. Use the M7 popup at every STOP.
-
-# Post-capture:
 $PY tools/pull_sessions.py --port /dev/cu.usbmodem*1105 --out raw_sessions/$STAMP/
 mv ~/Downloads/gosteady_capture_notes_$STAMP.json raw_sessions/$STAMP/
 $PY tools/ingest_capture.py \
     --sessions raw_sessions/$STAMP/ \
     --notes    raw_sessions/$STAMP/gosteady_capture_notes_$STAMP.json \
     --out      raw_sessions/$STAMP/capture_$STAMP.csv
-
-# Re-run cross-surface analysis against the cumulative dataset:
 algo/venv/bin/python3 -m algo.run_auto_surface
 algo/venv/bin/python3 -m algo.run_summary
 ```
 
-Outstanding: **outdoor s-curve (run 18)** is still missing from the v1 dataset (skipped on 2026-04-25 due to spacing). Worth grabbing on the next outdoor session.
+Outstanding from prior captures: **outdoor s-curve (run 18)** is still missing (skipped 2026-04-25 due to spacing). Worth grabbing on the next outdoor session.
 
-### Track C — M10.5 deployment-prep work (parallel to M10 algo port)
+### v1.5 retrain (post-deployment)
 
-These are the firmware tracks that M10.5 calls out as required for first deployment. All proceed independently of M8/M9 retrain. Scope and contracts are defined in the **Field Deployment (M10.5)** + **Portal Scope Impact** sections above.
-
-- **Cellular (LTE-M / NB-IoT) + MQTT/TLS to AWS IoT Core** — heartbeat publish on `gs/{serial}/heartbeat` every hour, activity publish on `gs/{serial}/activity` per session close. Per-device cert flashed manually (no fleet provisioning for first 3 units). Cellular network time via `AT+CCLK?` fills `session_*_utc_ms`. Long lead time on provisioning + RF; start now.
-- **Power architecture** — ADXL367 wake-on-motion as primary out-of-session wake source; nRF9151 deep sleep + BMI270 power-down between sessions; LTE-M PSM with hourly wake. This is the single most impactful work for hitting the 1-month battery target.
-- **nPM1300 fuel gauge wiring** — must land before site-survey unit ships. Fills `battery_mv` + `battery_pct` in heartbeat payload.
-- **Crash forensics** — persistent reset reason + fault counters + last-N log lines + watchdog hit counter in a dedicated flash region (separate from LittleFS); surfaced in next heartbeat after reset. Hardware watchdog kicked from a dedicated supervisor thread.
-- **Storage repartition** — grow LittleFS into the unused 19 MB on the GD25LE255E to add a snippet partition (~16 MB) + dedicated telemetry queue + crash-forensics region. Done via `pm_static.yml`; needs `-p always` rebuild.
-- **Snippet capture + storage** — scheduled (4/day) + anomaly-triggered (≤4/day cap), 30 s windows of raw 100 Hz BMI270 stored in the new snippet partition. Capture-pause-when-full and 14-day stale cutoff per M10.5 policy.
-- **`CONFIG_GOSTEADY_FIELD_MODE` Kconfig** — gates off heartbeat tick LED + session LEDs + bench USB/BLE control surface. Pre-activation blue LED is the only LED behavior. Enables one build target for deployment vs bench.
-- **Pre-activation gate** — refuses session capture until first cloud activation message received. Blocked on portal-side activation contract definition (open coordination item #1).
-
-### v1.5 retrain (after M10 ships, when carpet + extra data lands)
-
-Whenever the carpet captures + additional outdoor reps are done:
+Whenever carpet captures + additional outdoor reps + field-collected sessions accumulate:
 
 1. Add carpet rows to the per-surface coefficient table.
-2. Refine the R classifier from hard-threshold to either a multi-bin lookup (3+ surface bins) or a soft sigmoid blend if the boundary cases warrant it.
+2. Refine the R classifier (hard-threshold → multi-bin lookup or soft sigmoid blend if boundary cases warrant).
 3. Re-A/B single vs multi-feature stride regression at n=24+ where multi-feature collinearity should be tractable.
-4. Regenerate `src/algo/gosteady_algo_params.h`, push as a coefficient-only firmware update.
-5. Re-evaluate motion-gate thresholds against the carpet stationary baseline (run 29) and any field-collected stationary windows.
+4. Regenerate `src/algo/gosteady_algo_params.h`, push as a coefficient-only firmware update via OTA (post-deployment) or manual reflash (during deployment).
+5. Re-evaluate motion-gate thresholds against the carpet stationary baseline + field stationary windows.
 
-The algorithm code is *unchanged* in this transition — only the generated coefficient header rolls forward. That's the upside of the streaming + lookup-table architecture.
+The algorithm code is unchanged in this transition — only the generated coefficient header rolls forward. That's the upside of the streaming + lookup-table architecture.
 
 ---
 
