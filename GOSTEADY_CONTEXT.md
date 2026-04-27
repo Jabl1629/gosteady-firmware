@@ -298,12 +298,27 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
 8. **Dataset collection** — run the capture protocol end-to-end. *(paused at 19/30 — 10 indoor polished concrete + 8 outdoor concrete sidewalk + 1 outdoor stationary baseline. Carpet runs 21–30 deferred to v1.5 retrain by decision 2026-04-25; algorithm pipeline now ships with auto-surface adjustment so capturing more data is a tuning task, not a release blocker.)*
 9. **Python algorithm** — distance estimator trained on the dataset. *(Phase 1–4 done 2026-04-25. Architecture: streaming filter + motion gate + Schmitt peak FSM + single-feature stride regression + **auto-surface classifier** (motion-gated inter-peak RMS roughness metric → R-thresholded coefficient lookup). Cross-surface LOO at n=16: 22.4% pooled MAPE, 15/16 walks correctly auto-classified. v1.5 retrain at n=24+ planned post-carpet captures.)*
 10. **C port** — move the estimator on-device. *(done 2026-04-25 — `src/algo/{gs_filters,gs_motion_gate,gs_step_detector,gs_roughness,gs_pipeline}.h/c` + auto-generated `gosteady_algo_params.h`. Wired into `src/session.c` writer thread; emits two `ALGO_V1{A,B}` log lines at session close with distance_ft, R, surface_class, step_count, motion_s, total_s, motion_frac, overflow flag. Host regression suite (`tests/host/`, `make`-driven, no Zephyr/CMSIS dep) runs against the three M10 reference vectors and passes 31/31 checks within float32-vs-float64 tolerance. Firmware version bumped to `0.6.0-algo`. Stationary on-device validation passes (0 steps / 0 ft / NaN R, exactly mirroring `indoor_run09` fixture). Walking-path on-device validation **passes** (2026-04-25 ~18 s real walk: 12 peaks / R=0.056 / surface=indoor / distance=4.99 ft / motion_frac=43%; cadence 0.66 Hz matches characterized 0.4–0.7 Hz gait band; firmware_version=`0.6.0-algo` stamped in the pulled session header).)*
-10.5. **Field deployment requirements** — define the firmware capability set + cloud contract for the first remote deployment (3 Thingy:91 X units, rehab clinic, ~1 month, cellular only, no charging, no OTA, no user interaction). Drives M11–M14 sequencing. *(active in parallel with M10 — see "Field Deployment (M10.5)" section + "Portal Scope Impact" section.)*
-11. **Validation** — hold-out error characterization. (Algorithm-side: re-run cross-surface LOO with M10 C outputs from reference vectors; deployment-side: continuous in-field comparison against any clinic-supplied ground truth.)
-12. **Cellular** — LTE-M / NB-IoT link up on nRF9151. (Scoped by M10.5: MQTT/TLS to AWS IoT Core, hourly heartbeat, session-end activity uplink, opportunistic snippet flush. Sub-milestones: **M12.1a (modem attach + signal stats + AT+CCLK? time) DONE 2026-04-26**; M12.1b (refine reporter cadence + PSM enter/exit logging) deferred until 1c lands; **M12.1c — MQTT/TLS to AWS IoT Core + first heartbeat publish to `gs/{serial}/heartbeat`**, unblocked 2026-04-26 — needs the 3 cert sets cloud team is minting + endpoint hostname `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com`:8883 + Amazon Root CA 1 pin per coord doc §C.4.1–§C.4.2; M12.1d — activity uplink on session close; **M12.1e — pre-activation gate + `gs/{serial}/cmd` activation downlink + Device Shadow `desired.activated_at` re-check on every cellular wake** (per coord doc §C.4.4 — Shadow chosen over MQTT-retained for forward-compat with future per-device knobs; firmware needs to confirm NCS 3.2.4 `aws_iot` Shadow lib support per §C.5.1, fallback is MQTT-retained if it turns out painful); M12.1f — snippet uplink on `gs/{serial}/snippet` with the JSON-header framing from §F.3 + binary layout from §F.4 once snippet capture path lands.)
-13. **Cloud backend** — session telemetry upload. (Coordinated with portal Phase 1A/1B — already specified; firmware-side work is the on-device side of the contract.)
-14. **Production telemetry** — battery (nPM1300 fuel gauge), error/fault counters, OTA hooks. (M10.5 defines what's required vs. nice-to-have for first deployment.)
-15. **Field testing.**
+10.5. **Field deployment requirements** — define the firmware capability set + cloud contract for the first remote deployment (3 Thingy:91 X units, rehab clinic, ~1 month, cellular only, no charging, no OTA, no user interaction). Drives M10.7 + M11–M14.5 sequencing. *(spec done 2026-04-25; M14-prep Phase 1a–5 power architecture work done 2026-04-27 — see "Field Deployment (M10.5)" section + "Portal Scope Impact" section + Current State entries above.)*
+10.7. **Initial production telemetry** — deployment-readiness work pulled forward from former M14 because it's needed before site-survey ship. Sequenced parallel/interleaved with M12. *(NEW 2026-04-27.)*
+   - **10.7.1 Storage repartition** — `pm_static.yml` carves the unused 19 MB of external flash into snippet partition (~16 MB), telemetry queue (~256 KB raw), crash forensics region (~64 KB raw). Foundation for 10.7.3 + 12.1f. ~3 hr.
+   - **10.7.2 nPM1300 fuel gauge wiring** — real `battery_pct` + `battery_mv`. Hard prereq for 12.1c.2 since `battery_pct` is a required heartbeat field per portal contract. ~1 day with `nrf_fuel_gauge` lib.
+   - **10.7.3 Crash forensics + watchdog** — reset reason, fault counters, last-N log lines, watchdog hit counter persisted in 10.7.1's crash forensics region. Hardware watchdog kicked from a dedicated supervisor thread; fault triggers next-heartbeat surfacing. **No-OTA constraint means this must work first time** — bench-stress (forced HardFaults / forced WDT hits / fault-during-FS-write) before M14.5. ~2 days.
+11. **Validation** — split into algo-side and deployment-side.
+   - **11.1 Algo-side validation** — *passing*. M10 host regression suite (31/31 vs reference vectors) and on-device walking-path validation (2026-04-25, 12 peaks / 4.99 ft over ~18 s) cover the algorithm in isolation. Will formally redo a walking-path validation with the walker once the deployment-grade firmware is fully feature-complete (during/after M14.5) so the algo is verified against the same firmware build that's about to ship.
+   - **11.2 Deployment-side validation** — continuous in-field comparison vs any clinic-supplied ground truth, ~1 month. Outcome of M15.
+12. **Cellular** — LTE-M / NB-IoT link up on nRF9151. Scoped by M10.5: MQTT/TLS to AWS IoT Core, hourly heartbeat, session-end activity uplink, opportunistic snippet flush.
+   - **12.1a Modem attach + signal stats + UTC** — `AT+CESQ`, `AT%XSNRSQ?`, `AT+CCLK?`. *(done 2026-04-26 — registered as roaming in 6 s on first try.)*
+   - **12.1b** — *dropped 2026-04-27* (folded into 12.1c.2; cadence + PSM enter/exit logging are part of the production-shaped heartbeat, not a separate deliverable).
+   - **12.1c.1 Bench-cert minimum-viable heartbeat** — *the cloud↔firmware first-connection moment*. Cert-flash host script + MQTT/TLS bring-up + one heartbeat from `GS9999999999` (bench cert from `~/Desktop/gosteady-firmware-cert-handoff-2026-04-27/`) with placeholder `battery_pct: 0.5`. Endpoint `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com:8883`, Amazon Root CA 1 pin (per coord doc §C.4.1–§C.4.2). **Exit: message lands in Device Shadow `reported`.** Reusable bench cert means iterate freely while debugging TLS handshake; no shipping cert burned. NEW 2026-04-27.
+   - **12.1c.2 Production-shaped heartbeat** — hourly cadence (`k_timer` + work item) + all locked optional extras (`last_cmd_id`, `reset_reason`, `fault_counters`, `watchdog_hits`, `uptime_s`, `firmware`, `battery_mv`) + real `battery_pct` from 10.7.2 + populated `reset_reason` / `fault_counters` / `watchdog_hits` from 10.7.3. NEW 2026-04-27.
+   - **12.1d Activity uplink on session close** — payload to `gs/{serial}/activity` with `serial`, `session_start`, `session_end`, `steps`, `distance_ft`, `active_min` + optional `roughness_R`, `surface_class`, `firmware_version` (per coord doc §F.3). Reuses 12.1c plumbing entirely; cheap once 12.1c is up. ~1 day.
+   - **12.1e.1 NCS Shadow lib bench confirmation** — *micro-milestone, ~half day*. Verifies §C.5.1: `aws_iot_shadow_get` + `aws_iot_shadow_update` work in NCS 3.2.4 against a stub Thing in dev IoT account. If yes → 12.1e.2 uses Shadow per §C.4.4. If no → fallback is MQTT-retained `activate` cmd (cloud-side option still on the table per §C.4.4 fallback paragraph). NEW 2026-04-27.
+   - **12.1e.2 Pre-activation gate + Shadow re-check** — refuses session capture until first activation cmd received; blue LED slow-blink while in `ready_to_provision`; Shadow `desired.activated_at` re-check on every cellular wake (per §C.4.4); persists `activated_at` to flash; echoes `cmd_id` on next heartbeat as ack. Depends on 12.1e.1 outcome. ~2 days.
+   - **12.1f Snippet uplink** — JSON-header framing per §F.3 + binary layout per §F.4 (4-byte BE length-prefix + JSON header + 16-byte payload header + 28-byte sample records). Opportunistic upload piggybacking on Priority-1 cellular wakes per M10.5 snippet upload policy. Depends on 10.7.1. ~3 days.
+13. **Cloud backend** — session telemetry upload. (Coordinated with portal Phase 1A/1B — largely cloud-side; firmware-side responsibilities live in M12.)
+14. **Final production telemetry** — *renamed from "Production telemetry" 2026-04-27*. With nPM1300 + crash forensics moved to M10.7 (because they're prereqs for the production-shaped heartbeat / no-OTA-safety-net respectively, both required before site-survey ship), M14 becomes the future-work bucket: OTA hooks (AWS IoT Jobs + S3 + MCUboot signing), unit-4+ telemetry hardening, post-first-deployment iterations.
+14.5. **Site-survey unit shakedown** — flash `GS0000000001` with the deployment build, leave on the bench desk for ~1 week, observe heartbeat stream + Shadow + crash forensics + battery curve. Dress rehearsal between feature-complete and clinic ship. **Exit:** ≥7 days clean stream, zero unhandled resets, battery curve within ~20% of projection, M11.1 confirmation walk against this firmware build passes. NEW 2026-04-27.
+15. **Field testing** — clinic deployment of `GS0000000001/2/3` (or 0002/3 if 0001 stays as the site-survey unit). M11.2 measures the outcome.
 
 ---
 
@@ -799,24 +814,24 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 
 **Currently-open items (all firmware-side action):**
 
-1. **§C.5.1 — Confirm NCS 3.2.4 `aws_iot` library Shadow get/update support.** Gates the M12.1e build path (Device Shadow `desired.activated_at` re-check). Cloud's quick read suggests yes (`AWS_IOT_SHADOW_TOPIC_GET` + `aws_iot_shadow_update_accepted` event flow), but firmware needs to verify on bench. If Shadow turns out to be painful in NCS 3.2.4, fallback is MQTT-retained `activate` cmd. **Investigate when M12.1c heartbeat publish lands.**
-2. **§C.5.2 — Heartbeat clock drift characterization (deferred follow-up).** After M12.1c is up and a few weeks of heartbeats are flowing, post a one-paragraph note on observed AT+CCLK? drift across PSM cycles + sub-second precision. Helps cloud-side anomaly detection threshold tuning. Not a blocker.
-3. **§C.5.3 — Pre-activation battery cost per cycle (deferred follow-up).** After M12.1c gives empirical numbers, report rough mC per modem-attach + heartbeat + Shadow-get + sleep cycle. If high, cloud may add a "stuck in pre-activation > 7 days" alarm threshold. Not a spec change. Not a blocker.
+1. **§C.5.1 — Confirm NCS 3.2.4 `aws_iot` library Shadow get/update support.** Gates the M12.1e.2 build path (Device Shadow `desired.activated_at` re-check). Cloud's quick read suggests yes (`AWS_IOT_SHADOW_TOPIC_GET` + `aws_iot_shadow_update_accepted` event flow), but firmware needs to verify on bench. If Shadow turns out to be painful in NCS 3.2.4, fallback is MQTT-retained `activate` cmd. **Now formalized as micro-milestone M12.1e.1 in the arc; sequenced after M12.1c.2 production-shaped heartbeat lands.**
+2. **§C.5.2 — Heartbeat clock drift characterization (deferred follow-up).** After M12.1c.2 is up and a few weeks of heartbeats are flowing, post a one-paragraph note on observed AT+CCLK? drift across PSM cycles + sub-second precision. Helps cloud-side anomaly detection threshold tuning. Not a blocker.
+3. **§C.5.3 — Pre-activation battery cost per cycle (deferred follow-up).** After M12.1c.2 gives empirical numbers, report rough mC per modem-attach + heartbeat + Shadow-get + sleep cycle. If high, cloud may add a "stuck in pre-activation > 7 days" alarm threshold. Not a spec change. Not a blocker.
 
-**Cloud-side commitments inflight (committed by them within ~1 working day from 2026-04-26):**
+**Cloud-side commitments — DONE 2026-04-27** (per cloud entries §C2 + §C3):
 
-- Mint cert + key for `GS0000000001/2/3` and attach per-thing IoT policies
-- DM the three 1Password shared items (one per serial, 7-day expiry)
-- Pre-create the three `ready_to_provision` Device Registry records
-- Reply in the shared doc once cert sets are ready
+- ✅ Mint cert + key for `GS0000000001/2/3` and attach per-thing IoT policies — done; also added bench cert `GS9999999999` from reserved test range, reusable forever for firmware-team bench unit
+- ✅ ~~DM the four 1Password shared items~~ — *cancelled* per §C3 single-dev correction; bundle staged at `~/Desktop/gosteady-firmware-cert-handoff-2026-04-27/` instead (firmware reads cert + key + Root CA directly from disk)
+- ✅ Pre-create the four `ready_to_provision` Device Registry records
+- ✅ `iot:GetThingShadow` + `iot:UpdateThingShadow` policy grants added early so M12.1e.2 path is unblocked from day one (per §C2.3)
 
 **Cloud-side architectural follow-ups (within ~1 week, parallel to firmware M12.1c):**
 
 - Phase 1A revision spec update — snippet IoT Rule + Lambda redesign, Shadow `desired.activated_at` write hooks across state-machine transitions, cumulative requirement updates
 - Phase 1A revision deploy — `gs/{serial}/cmd` IoT policy, snippet S3 bucket, snippet parser Lambda, pre-activation alert suppression
-- CLI helper for Device Registry bulk-import from companion repo CSV
+- CLI helper for Device Registry bulk-import from companion repo CSV (deferred relevance — single-dev mode means rows for `GS9999999999` + `GS0000000001/2/3` are already pre-created; CLI helper matters for unit 5+)
 
-**Firmware-side blockers cleared:** all 6 §F.9 items decided; M12.1c (first heartbeat publish) is now buildable as soon as the 3 cert sets land via 1Password.
+**Firmware-side blockers cleared:** all 6 §F.9 items decided; cert bundle on disk; **M12.1c.1 (first heartbeat publish) is buildable now** — see Immediate Next Steps for the cert-bundle verification + cert-flash + MQTT/TLS bring-up + first-publish sub-tasks.
 
 ---
 
@@ -830,48 +845,76 @@ A two-day sprint shipped the entire **M14-prep power architecture** (Phases 1a�
 
 Zero button presses end-to-end. `CONFIG_PM=y` enables System ON Idle (~50 µA) between motion events. `CONFIG_GOSTEADY_FIELD_MODE` Kconfig gates off bench-only paths (SW0, dump UART, heartbeat LEDs) for the deployment build via `prj_field.conf` overlay.
 
-Cross-team coordination with the cloud-side Claude session (see Portal Scope Impact §meta context) is fully caught up as of 2026-04-26. **All M12.1c blockers are decided** — endpoint URL, root CA, starting serials, cert delivery flow, manufacturer enrollment workflow.
+Cross-team coordination with the cloud-side Claude session (see Portal Scope Impact §meta context) is fully caught up as of 2026-04-27. **All M12.1c.1 blockers are decided and the cert bundle is on disk** at `~/Desktop/gosteady-firmware-cert-handoff-2026-04-27/` — endpoint URL, Amazon Root CA 1, four cert+key pairs (one reusable bench cert `GS9999999999` + three shipping certs `GS0000000001/2/3`), all pre-attached to IoT Things + per-thing IoT policies + `ready_to_provision` Device Registry rows on cloud side.
 
 **Done milestones (chronological):** M1–M7 (bench data capture pipeline) → M9 Phase 1–4 (auto-surface algorithm) → M10 (algo C port + on-device walking-path validation) → M10.5 (deployment requirements + portal coordination) → M12.1a (modem attach + AT+CCLK?) → **M14-prep Phase 1a/1b/2/3/4/5** (full power architecture, both build configs).
 
-### Track A — M12.1c first heartbeat publish (highest-leverage next milestone)
+**Renumbering as of 2026-04-27** — the 15-Step Firmware Arc was refactored to: (a) split M12.1c into .1/.2 (separating "first cloud↔firmware connection" from "production-shaped heartbeat"); (b) split M11 into 11.1 algo-side / 11.2 deployment-side; (c) introduce **M10.7 Initial production telemetry** (storage repartition + nPM1300 + crash forensics, pulled forward from M14 because they're prereqs for the production-shaped heartbeat / no-OTA-safety-net respectively, both required before site-survey ship); (d) rename M14 to "Final production telemetry" (now a future-work bucket: OTA + unit-4+ hardening); (e) add **M14.5 Site-survey unit shakedown** as the explicit dress-rehearsal milestone between feature-complete and clinic ship; (f) drop M12.1b (folded into M12.1c.2); (g) introduce micro-milestone **M12.1e.1 NCS Shadow lib bench confirmation**. Driving priority is **see the cloud↔firmware connection ASAP** (M12.1c.1) so cloud-side work that's been built speculatively for weeks gets concrete acceptance testing.
 
-The chunky one. ~2-3 days of focused firmware work + a few side-quests.
+### Recommended sequence
 
-**Foundation prerequisites (do these first; bounded, low-risk, parallel-safe):**
+The driving priority is **see the cloud↔firmware connection ASAP** — **M12.1c.1** is the next milestone (~3-5 days). Once that lands, **M12.1d** + **M10.7.2** + **M12.1c.2** round out the cloud surface for acceptance testing (~3-5 days, parallel-friendly). Deployment-readiness work — **M10.7.1** + **M10.7.3** + **M12.1e.1** + **M12.1e.2** + **M12.1f** — is largely parallel-safe and lands before **M14.5** site-survey shakedown (~1.5-2 weeks total). M14.5 includes the **M11.1** confirmation walk against shipping firmware. Then **M15** = clinic deployment with **M11.2** as the measured outcome.
 
-1. **Storage repartition (`pm_static.yml`)** — carve the unused 19 MB on external flash (`0xcd2000–0x2000000`) into:
-    - `littlefs_snippets` (~16 MB, second LittleFS instance for snippet ring)
-    - `telemetry_queue` (~256 KB raw flash, persists Priority-1 heartbeat/activity across reboot)
-    - `crash_forensics` (~64 KB raw flash, reset reason + fault counters + last-N log lines + watchdog hits)
-    - reserve ~3 MB free
-   Touches `pm_static.yml` only. Verify boot_count still increments + existing M10 sessions still mount unchanged. **~2-3 hr.** Foundation for crash forensics and snippet upload tracks.
+Detailed per-milestone notes below in execution order. Resumption of **M8** carpet captures (runs 21-30) is non-blocking and can happen any time.
 
-2. **`device-registry.csv` private companion repo** — per Portal Scope Impact §C.4.5 manufacturer enrollment workflow. Create a private GitHub repo, commit `device-registry.csv` with header `serial, cert_fingerprint, flash_date, firmware_version`. Share read access with cloud-side session. **~5 min.** Cloud team's CLI helper script will pull from here at flash time.
+### M12.1c.1 — First cloud↔firmware connection (~3-5 days)
 
-3. **Confirm NCS Shadow lib (§C.5.1)** — small bench test that does `aws_iot_shadow_get` + `aws_iot_shadow_update` against a stub Thing in dev IoT account. Verifies the lib works in NCS 3.2.4. If it doesn't, fallback is MQTT-retained `activate` cmd (cloud team's option-a). **~half-day.** Unblocks M12.1e for later.
+Goal: any well-formed MQTT message reaches Device Shadow. Skip every optional field, every parallel polish item, every component that doesn't sit on the publish path.
 
-**M12.1c heartbeat publish proper (~2-3 days):**
+**Sub-task 0 — Verify bundle + cloud-side path is live (~5 min):**
 
-4. **MQTT/TLS bring-up** — Add `CONFIG_NRF_MODEM_LIB=y` already in place; add `CONFIG_AWS_IOT=y` (or bare `CONFIG_MQTT_LIB=y` + roll our own) + TLS sec_tag config. NCS's `aws_iot` lib handles thing-aware topics + Shadow natively, recommended over bare MQTT.
+1. `ls ~/Desktop/gosteady-firmware-cert-handoff-2026-04-27/GS9999999999/` — confirm cert + key + Root CA files. Skim `GS9999999999/README.txt` — already documents the `AT%CMNG=0,<sec_tag>,...` flashing pattern.
+2. Optional sanity check: re-run the verification block in cloud coord doc §C2.2 to confirm Thing + Registry row are still there and cert is still ACTIVE.
+3. Cloud-side acceptance probe: `aws iot publish` a synthetic minimum-payload heartbeat to `gs/GS9999999999/heartbeat` and watch the Shadow update with `aws iot get-thing-shadow --thing-name GS9999999999`. **Validates the cloud-side path independently of firmware** — clean signal if firmware bring-up later fails.
 
-5. **Cert provisioning at flash time** — Small host-side script taking cert + key + serial, writing to modem secure store via `AT%CMNG=0,<sec_tag>,...` over uart1. Runs once per device. The other Claude session generates certs via `aws iot create-keys-and-certificate` whenever firmware is ready to receive them.
+**Sub-task 1 — Implementation:**
 
-6. **Heartbeat payload builder + scheduler** — JSON builder with required fields (`serial`, `ts`, `battery_pct`, `rsrp_dbm`, `snr_db`) + the optional extras already locked (`last_cmd_id`, `reset_reason`, `fault_counters`, `watchdog_hits`, `battery_mv`, `firmware`, `uptime_s`). Hourly timer fires modem wake → publish → return to PSM.
+4. **Cert-flash host script** (~half day). Reads cert + key + Root CA paths as args, flashes via `AT%CMNG=0,<sec_tag>,{0,1,2},"<pem>"` over uart1, verifies with `AT%CMNG=1,<sec_tag>`. Inputs default to bench cert paths so the iteration loop is one command. **Pick one sec_tag (suggest `42` — common NCS aws_iot sample default; verify before locking in) and document it in both the script and `prj.conf`.** Not throwaway — same tool with `--serial` flag flashes shipping units later.
+5. **MQTT/TLS bring-up via NCS `aws_iot` lib** (~2 days). New `src/cloud.c` (do not entangle with `cellular.c`). `CONFIG_AWS_IOT=y`. Endpoint + sec_tag + serial all from Kconfig. Connect-on-attach, log handshake outcome verbosely first time through. Pin Amazon Root CA 1 explicitly via the bundled `AmazonRootCA1.pem`.
+6. **One-shot heartbeat publisher with placeholders** (~half day). Required-fields-only payload: `serial = "GS9999999999"` (compile-time), real `ts` from M12.1a's `AT+CCLK?`, real `rsrp_dbm` + `snr_db` from M12.1a's reporter, **`battery_pct: 0.5` hardcoded placeholder**. One publish on first attach, then log + sleep.
+7. **Watch it land cloud-side** with `aws iot get-thing-shadow --thing-name GS9999999999`. **THE moment** — schema validation, IoT Rule routing, Shadow `reported` write, all the speculatively-built cloud machinery, all gets exercised by this single message. Stop, take a breath, look at what cloud-side acceptance testing surfaces. Post a firmware-side milestone entry in `gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md` so cloud-side Claude reads it on next session.
 
-7. **First end-to-end heartbeat** — flash firmware on `GS0000000001`, generate cert in other session, flash cert, watch heartbeat hit cloud Device Shadow. Site-survey-unit-equivalent milestone.
+### M12.1d — Activity uplink (~1 day, after M12.1c.1)
 
-### Track B — Sequential / parallel tracks after M12.1c
+Reuses M12.1c.1 plumbing entirely; just a different topic + payload triggered on session close. **High value-per-day**: gets the Activity DDB write + idempotency-on-`(serial, session_end)` path under concrete test, surfaces a second message type into cloud quickly.
 
-Each is its own focused chunk; M12.1c unblocks all of them.
+### M10.7.2 — nPM1300 fuel gauge wiring (~1 day, parallel to M12.1d)
 
-- **nPM1300 fuel gauge wiring** — ~1 day. Fills `battery_pct` and `battery_mv` in heartbeat payload. Currently stamps 0. Better landed before M12.1c so first heartbeat has real data, but post-M12.1c works too.
-- **Crash forensics + watchdog** — ~2 days. Persistent reset reason / fault counters / last-N log lines / watchdog hit counter in the `crash_forensics` partition. Hardware watchdog kicked from a dedicated supervisor thread; fault triggers next-heartbeat surfacing.
-- **M12.1d activity uplink** — ~1 day. Payload builder for `gs/{serial}/activity` on session close. Most plumbing reused from M12.1c.
-- **M12.1e pre-activation gate + Shadow re-check** — ~2 days. Refuses session capture until first cloud activation cmd received. Blue LED slow-blink while in `ready_to_provision`. Shadow `desired.activated_at` re-check on every cellular wake (per cloud §C.4.4). Blocked only on §C.5.1 NCS Shadow lib confirmation.
-- **M12.1f snippet uplink** — ~3 days. Needs storage repartition done. JSON-header framing per §F.3 + binary layout per §F.4 (4-byte BE length-prefix + JSON header + 16-byte payload header + 28-byte sample records). Opportunistic upload piggybacking on Priority-1 cellular wakes per the M10.5 snippet upload policy.
+Real `battery_pct` + `battery_mv` via `nrf_fuel_gauge` lib. One-line swap from the M12.1c.1 placeholder. Hard prereq for M12.1c.2 since `battery_pct` is a required heartbeat field per portal contract.
 
-### Track C — Resume M8 captures (carpet runs 21–30) when convenient
+### M12.1c.2 — Production-shaped heartbeat (~1-2 days; depends on M10.7.2 + M10.7.3)
+
+Hourly cadence (`k_timer` + work item) + add the locked optional extras one at a time (`last_cmd_id`, `reset_reason`, `fault_counters`, `watchdog_hits`, `uptime_s`, `firmware`). Watch each appear in Shadow `extras` — confirms cloud's accept-all-unknown-fields behavior. The `reset_reason` / `fault_counters` / `watchdog_hits` fields stay zero-stamped until M10.7.3 lands; that's fine — they wire up cleanly later.
+
+### M10.7.1 — Storage repartition (~3 hr)
+
+`pm_static.yml` change. Foundation for M10.7.3 + M12.1f. Verify boot_count still increments + existing M10 sessions still mount unchanged. Use `-p always` after this change.
+
+### M10.7.3 — Crash forensics + watchdog (~2 days; depends on M10.7.1)
+
+Reset reason / fault counters / last-N log lines / watchdog hit counter persisted in M10.7.1's `crash_forensics` partition. Hardware watchdog kicked from a dedicated supervisor thread. **Stress-test: forced HardFaults, forced WDT hits, fault-during-FS-write.** Verify forensics survive reset and surface in next heartbeat (M12.1c.2's `reset_reason` / `fault_counters` / `watchdog_hits` fields read from this region). Best landed after M12.1c.2 is up because the new cellular code paths are where most novel faults will originate, so the forensics design knows what to capture.
+
+### M12.1e.1 — NCS Shadow lib bench confirmation (~half day, micro-milestone)
+
+Stub Thing in dev IoT account; verify `aws_iot_shadow_get` + `aws_iot_shadow_update` work in NCS 3.2.4. Outcome gates M12.1e.2 implementation choice (Shadow per §C.4.4 vs MQTT-retained fallback). Closes coord doc §C.5.1.
+
+### M12.1e.2 — Pre-activation gate + Shadow re-check (~2 days; depends on M12.1e.1)
+
+Refuses session capture until first activation cmd received. Blue LED slow-blink while in `ready_to_provision`. Shadow `desired.activated_at` re-check on every cellular wake (per §C.4.4). Persisted `activated_at` to flash. Echoes `cmd_id` on next heartbeat as ack.
+
+### M12.1f — Snippet uplink (~3 days; depends on M10.7.1)
+
+JSON-header framing per coord doc §F.3 + binary layout per §F.4 (4-byte BE length-prefix + JSON header + 16-byte payload header + 28-byte sample records). Opportunistic upload piggybacking on Priority-1 cellular wakes per M10.5 snippet upload policy.
+
+### M14.5 — Site-survey unit shakedown (~1 day setup, ~1 week observation)
+
+Flash `GS0000000001` with shipping cert + deployment build. Sit on bench desk powered up. Observe heartbeat stream + Shadow + battery curve + crash forensics across ≥7 days. Includes **M11.1 confirmation walk** with the walker against this exact build — algo-side validation against shipping firmware, not just bench firmware.
+
+### M15 — Field testing + M11.2 deployment-side validation
+
+Flash `GS0000000002/3` with shipping certs (procedure now well-shaken from M14.5; `GS0000000001` may stay as the survey/dev unit per use case). Deploy to clinic. **M11.2** runs continuously across the ~1-month deployment window: in-field distance estimates vs any clinic-supplied ground truth. Battery life is a measured outcome (not a pre-tuned constraint per 2026-04-25 decision). v1.5 retrain inputs accumulate: snippets returned from devices + resumed M8 carpet captures.
+
+### M8 cont. — Resume carpet captures (runs 21-30), non-blocking
 
 Not blocking anything else; the 19-run dataset already in the v1 algorithm coefficients is enough for the deployment build. Useful for v1.5 retrain when convenient. Capture command sequence:
 
