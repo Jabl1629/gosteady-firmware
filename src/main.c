@@ -24,6 +24,7 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/drivers/i2c.h>
+#include <math.h>
 #include <stdlib.h>
 
 #include "session.h"
@@ -412,6 +413,156 @@ schedule_next:
 	}
 }
 
+/* Forward declarations for state shared between Phase 1a (ADXL367 trigger
+ * handler) and Phase 2 (auto-start coordinator). The trigger handler and
+ * its counters live further down, near the rest of the ADXL367 plumbing. */
+static atomic_t s_motion_count;
+static atomic_t s_inactivity_count;
+static K_SEM_DEFINE(motion_event_sem, 0, 1);
+
+/* ---- Phase 2: ADXL367 motion → BMI270 confirmation → auto session start ----
+ *
+ * Connects Phase 1a (ADXL367 wake-on-motion) and Phase 1b (BMI270 PM)
+ * into the deployment-mode auto-start state machine described in the
+ * M10.5 spec:
+ *
+ *   "Auto-start session capture on motion. ADXL367 wake-on-motion via
+ *    INT1 line wakes the nRF9151 from deep sleep; nRF9151 confirms
+ *    sustained motion via short BMI270 sample window before opening
+ *    a session."
+ *
+ * Why a confirmation window instead of opening on the raw ADXL367
+ * trigger? Because chip-level activity detection at 50 mg threshold
+ * fires on lots of things that aren't real walking — door slam, walker
+ * bumping the wall, cap getting set down on a hard surface. Each false-
+ * positive session-open + close cycle wastes a few hundred ms of
+ * BMI270 power and writes a useless little file to flash. Spending
+ * 500 ms confirming with the algorithm-grade sensor (BMI270, the same
+ * chip the M9 motion gate runs on) before committing pays for itself
+ * in deployment.
+ *
+ * State machine (per motion event):
+ *   wait on motion_event_sem
+ *   ├── if session already active (manual SW0/BLE start): ignore
+ *   └── else:
+ *         resume BMI270, settle + drop 4 (Phase 1b warm-up pattern)
+ *         sample 500 ms / 50 ticks of |a|/g − 1 → compute σ
+ *         if σ > 0.05 g → real walking → session_start(), sampler takes over
+ *         if σ ≤ 0.05 g → false positive → suspend BMI270, return to idle
+ *
+ * Latency budget (real-motion → green LED):
+ *   ~100 ms ADXL367 chip-level filter (act_time=10 samples @ 100Hz)
+ * + ~50 ms  coordinator wakes + BMI270 resume + warm-up
+ * + 500 ms  confirmation window
+ * + ~few ms session_start handshake + LED set
+ *   ────────
+ *   ≈ 0.7 s
+ */
+
+#define AUTO_START_CONFIRM_MS         500
+#define AUTO_START_CONFIRM_PERIOD_MS  10  /* 100 Hz, matches BMI270 ODR */
+#define AUTO_START_CONFIRM_SAMPLES    (AUTO_START_CONFIRM_MS / AUTO_START_CONFIRM_PERIOD_MS)
+#define AUTO_START_SIGMA_THR_G        0.05f
+#define G_MS2                          9.80665f
+
+K_THREAD_STACK_DEFINE(auto_start_stack, 2048);
+static struct k_thread auto_start_thread;
+
+static void auto_start_entry(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+
+	struct sensor_value accel[3];
+
+	while (1) {
+		/* Block until ADXL367 wake-on-motion fires. */
+		(void)k_sem_take(&motion_event_sem, K_FOREVER);
+
+		/* Drop the event if a session is already capturing — manual
+		 * SW0/BLE START got in first, or the previous auto-start
+		 * already promoted to a session and the sampler hasn't
+		 * stopped yet. */
+		if (gosteady_session_is_active()) {
+			continue;
+		}
+
+		LOG_INF("auto-start: motion observed → confirming with BMI270");
+
+		/* Resume BMI270 (idempotent if already on) and apply the
+		 * Phase 1b warm-up pattern: 25 ms settle + 2 prime fetches
+		 * + 4 dropped samples to clear register-reset zeros. */
+		(void)bmi270_set_active(true);
+		k_msleep(25);
+		(void)sensor_sample_fetch(bmi270);
+		(void)sensor_sample_fetch(bmi270);
+		for (int i = 0; i < 4; i++) {
+			k_msleep(AUTO_START_CONFIRM_PERIOD_MS);
+			(void)sensor_sample_fetch(bmi270);
+		}
+
+		/* Sample 500 ms of |a|/g, compute σ of (|a|/g − 1) so
+		 * gravity drops out and we're left with motion energy. */
+		float sum = 0.0f;
+		float sum_sq = 0.0f;
+		int n = 0;
+		float peak_dev = 0.0f;
+		for (int i = 0; i < AUTO_START_CONFIRM_SAMPLES; i++) {
+			k_msleep(AUTO_START_CONFIRM_PERIOD_MS);
+			if (sensor_sample_fetch(bmi270) != 0) { continue; }
+			if (sensor_channel_get(bmi270, SENSOR_CHAN_ACCEL_XYZ, accel) != 0) { continue; }
+			float ax = (float)sensor_value_to_double(&accel[0]);
+			float ay = (float)sensor_value_to_double(&accel[1]);
+			float az = (float)sensor_value_to_double(&accel[2]);
+			float mag_g = sqrtf(ax * ax + ay * ay + az * az) / G_MS2;
+			float dev = mag_g - 1.0f;
+			sum    += dev;
+			sum_sq += dev * dev;
+			if (fabsf(dev) > peak_dev) { peak_dev = fabsf(dev); }
+			n++;
+		}
+		if (n == 0) {
+			LOG_WRN("auto-start: no valid samples in confirmation window — abort");
+			(void)bmi270_set_active(false);
+			continue;
+		}
+		float mean  = sum / (float)n;
+		float var   = sum_sq / (float)n - mean * mean;
+		float sigma = (var > 0.0f) ? sqrtf(var) : 0.0f;
+
+		if (sigma > AUTO_START_SIGMA_THR_G) {
+			LOG_INF("auto-start: motion CONFIRMED (σ=%.4f g, peak=%.3f g, n=%d) → opening session",
+				(double)sigma, (double)peak_dev, n);
+			int ret = gosteady_session_start(&BENCH_PREWALK);
+			if (ret == 0) {
+				led_set_recording(true);
+				/* Session is now active — sampler thread's
+				 * idle→active transition handler will take
+				 * over BMI270 ownership on its next tick.
+				 * The chip is currently on; no harm in the
+				 * sampler's redundant resume call (the
+				 * underlying register write is idempotent).
+				 *
+				 * Stay in the loop to ignore further motion
+				 * events until the session ends. */
+				continue;
+			}
+			LOG_WRN("auto-start: session_start failed (%d) → returning to idle", ret);
+		} else {
+			LOG_INF("auto-start: motion NOT confirmed (σ=%.4f g, peak=%.3f g, n=%d, threshold=%.2f g) → idle",
+				(double)sigma, (double)peak_dev, n,
+				(double)AUTO_START_SIGMA_THR_G);
+		}
+
+		/* Either confirmation failed or session_start failed — put
+		 * BMI270 back to sleep so we're back in the cheap idle
+		 * state. Drain any motion events that piled up during the
+		 * 500 ms confirmation window so we don't immediately
+		 * re-enter (debounce). */
+		(void)bmi270_set_active(false);
+		(void)k_sem_reset(&motion_event_sem);
+	}
+}
+
 /* ---- Button-press session toggle (runs on main context, not ISR) ---- */
 
 static void handle_button_press(void)
@@ -449,9 +600,8 @@ static void handle_button_press(void)
  * reads them once a heartbeat and logs deltas.
  */
 
-static atomic_t s_motion_count;     /* SENSOR_TRIG_THRESHOLD (activity)   */
-static atomic_t s_inactivity_count; /* SENSOR_TRIG_DELTA     (inactivity) */
-static K_SEM_DEFINE(motion_event_sem, 0, 1);
+/* Counters + motion_event_sem are forward-declared earlier, near the
+ * Phase 2 auto-start coordinator that consumes them. */
 
 static void adxl367_trigger_handler(const struct device *dev,
 				     const struct sensor_trigger *trig)
@@ -729,6 +879,17 @@ int main(void)
 			sampler_entry, NULL, NULL, NULL,
 			5, 0, K_NO_WAIT);
 	k_thread_name_set(&sampler_thread, "sampler");
+
+	/* Phase 2: kick off the auto-start coordinator. Lower priority
+	 * than the sampler — it spends most of its life blocked on
+	 * motion_event_sem, and even when it's running its 500 ms
+	 * confirmation window it shouldn't preempt the 100 Hz sampler
+	 * loop. */
+	k_thread_create(&auto_start_thread, auto_start_stack,
+			K_THREAD_STACK_SIZEOF(auto_start_stack),
+			auto_start_entry, NULL, NULL, NULL,
+			6, 0, K_NO_WAIT);
+	k_thread_name_set(&auto_start_thread, "auto_start");
 
 	/* Bring up the host-facing dump channel on uart1. */
 	if (gosteady_dump_start() < 0) {
