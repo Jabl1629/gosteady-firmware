@@ -199,6 +199,18 @@ int gosteady_session_stop(uint32_t *out_sample_count);
 /* True if a session is currently open and accepting samples. */
 bool gosteady_session_is_active(void);
 
+/* Phase 3 auto-stop input: count of consecutive non-motion samples
+ * the writer thread has seen since the last motion-gate-active sample.
+ * Updated per-sample in the writer thread; read from the main thread's
+ * heartbeat tick. Resets to 0 on session_start and on every
+ * motion-gate-active sample. Sample rate is 100 Hz, so seconds = N/100.
+ *
+ * The motion gate already has its own 500 ms running window + Schmitt
+ * hysteresis with a 2 s exit-hold, so this counter only climbs after
+ * the gate confirms sustained stillness — brief mid-walk pauses don't
+ * contribute. */
+uint32_t gosteady_session_stationary_samples(void);
+
 /* Format the currently-active session's UUIDv4 as canonical
  * 36-char hyphenated string plus NUL (37 bytes). `out_sz` must
  * be >= 37. Returns 0 on success, -ENODEV if no session is

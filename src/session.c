@@ -82,6 +82,16 @@ static bool               s_pipeline_seeded;
 static struct gs_pipeline_outputs s_pipeline_outputs;
 static bool               s_pipeline_outputs_valid;
 
+/* Phase 3 auto-stop: count of consecutive non-motion samples seen by the
+ * writer thread since the last motion-gate-active sample. Reset to 0 in
+ * the start handshake and on any motion-active sample. Reads from the
+ * main thread (heartbeat tick) are deliberately unsynchronized — this is
+ * a single-writer single-reader counter, the writer increments
+ * monotonically while still, and a slightly stale read just means the
+ * auto-stop fires at most one heartbeat tick (1 s) later than its
+ * threshold. */
+static volatile uint32_t  s_stationary_samples;
+
 /* --- Helpers --- */
 
 static int gen_uuid_v4(uint8_t out[16])
@@ -212,6 +222,7 @@ static void writer_entry(void *p1, void *p2, void *p3)
 			s_pipeline_seeded = false;
 			s_pipeline_outputs_valid = false;
 			memset(&s_pipeline_outputs, 0, sizeof(s_pipeline_outputs));
+			s_stationary_samples = 0;
 			k_poll_signal_reset(&start_signal);
 			events[2].state = K_POLL_STATE_NOT_READY;
 			k_sem_give(&start_done_sem);
@@ -236,6 +247,21 @@ static void writer_entry(void *p1, void *p2, void *p3)
 					s_pipeline_seeded = true;
 				}
 				gs_pipeline_step(&s_pipeline, mag_g);
+				/* Phase 3 auto-stop input: track consecutive
+				 * non-motion samples. The motion gate's
+				 * `in_motion` flag has its own 500 ms running
+				 * window + Schmitt hysteresis (exit_hold = 2 s),
+				 * so this counter increments only after the gate
+				 * has confirmed sustained stillness — brief
+				 * mid-walk pauses don't drag it up. Reset to
+				 * zero on every motion-active sample. Read by
+				 * gosteady_session_stationary_samples() from the
+				 * main thread's heartbeat tick. */
+				if (s_pipeline.gate.in_motion) {
+					s_stationary_samples = 0;
+				} else {
+					s_stationary_samples++;
+				}
 				local_batch[batch_fill++] = s;
 				if (batch_fill == SAMPLE_BATCH_COUNT) {
 					(void)writer_flush(local_batch, &batch_fill);
@@ -434,6 +460,11 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 bool gosteady_session_is_active(void)
 {
 	return s_active;
+}
+
+uint32_t gosteady_session_stationary_samples(void)
+{
+	return s_stationary_samples;
 }
 
 int gosteady_session_get_uuid_str(char *out, size_t out_sz)

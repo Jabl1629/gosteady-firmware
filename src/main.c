@@ -36,6 +36,13 @@ LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 #define HEARTBEAT_PERIOD_MS  1000
 #define SAMPLE_PERIOD_MS     10   /* 100 Hz */
 
+/* Phase 3: how many seconds of M9-motion-gate stillness before the
+ * main loop auto-closes an open session. M10.5 spec calls for a
+ * default of 30 s; using 15 s for bench testing so cycles are quick.
+ * TODO: move to Kconfig with a deployment-mode override (30 s) when
+ * Phase 5 (FIELD_MODE) lands. */
+#define AUTO_STOP_STATIONARY_S  15
+
 /* ---- RGB LED (three GPIO channels; purple = red + blue, green only while recording) ---- */
 #define LED_RED_NODE   DT_ALIAS(led0)
 #define LED_GREEN_NODE DT_ALIAS(led1)
@@ -917,6 +924,28 @@ int main(void)
 			gpio_pin_toggle_dt(&led_blue);
 			LOG_INF("heartbeat tick=%u", tick++);
 			log_adxl367_motion_counts();
+		} else {
+			/* Phase 3 auto-stop: end the session after the M9
+			 * motion gate has confirmed AUTO_STOP_STATIONARY_S
+			 * seconds of sustained stillness. The gate's own
+			 * 500 ms running window + Schmitt exit-hold (2 s)
+			 * already debounce against brief mid-walk pauses,
+			 * so the counter we read only climbs after the gate
+			 * has truly settled into "still". 1 Hz polling here
+			 * means the auto-stop fires within ~1 s of crossing
+			 * the threshold — fine for a 15-30 s timeout. */
+			uint32_t stationary_n = gosteady_session_stationary_samples();
+			uint32_t stationary_s = stationary_n / 100;
+			if (stationary_s >= AUTO_STOP_STATIONARY_S) {
+				LOG_INF("auto-stop: %u s of stationary motion → ending session",
+					(unsigned)stationary_s);
+				uint32_t count = 0;
+				int ret = gosteady_session_stop(&count);
+				led_set_recording(false);
+				if (ret < 0) {
+					LOG_ERR("auto-stop session_stop failed (%d)", ret);
+				}
+			}
 		}
 		k_msleep(HEARTBEAT_PERIOD_MS);
 	}
