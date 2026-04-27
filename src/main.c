@@ -955,12 +955,17 @@ int main(void)
 		LOG_WRN("cellular bring-up failed — proceeding without modem");
 	}
 
-	/* M12.1c.1: spawn the cloud one-shot heartbeat publisher. The
-	 * publisher thread blocks on cellular registration + network time
-	 * before connecting to AWS IoT, so the order between
-	 * gosteady_cellular_start() above and this is not load-bearing. */
-	if (gosteady_cloud_init() < 0) {
-		LOG_WRN("cloud init failed — proceeding without cloud");
+	/* M12.1c.1: spawn the cloud one-shot heartbeat publisher when
+	 * built with CONFIG_GOSTEADY_CLOUD_ENABLE (prj_cloud.conf or
+	 * prj_field.conf). The publisher thread blocks on cellular
+	 * registration + network time before connecting, so order vs
+	 * gosteady_cellular_start() above is not load-bearing. Default
+	 * bench builds skip this entirely so M8 data-collection runs are
+	 * undisturbed by cellular activity at boot. */
+	if (IS_ENABLED(CONFIG_GOSTEADY_CLOUD_ENABLE)) {
+		if (gosteady_cloud_init() < 0) {
+			LOG_WRN("cloud init failed — proceeding without cloud");
+		}
 	}
 
 	LOG_INF("Bring-up complete. %s",

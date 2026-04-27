@@ -9,11 +9,11 @@ target_sources(app PRIVATE
   src/dump.c
   src/control.c
   src/cellular.c
-  src/cloud.c
   src/algo/gs_filters.c
   src/algo/gs_motion_gate.c
   src/algo/gs_step_detector.c
   src/algo/gs_roughness.c
   src/algo/gs_pipeline.c
 )
+target_sources_ifdef(CONFIG_GOSTEADY_CLOUD_ENABLE app PRIVATE src/cloud.c)
 target_include_directories(app PRIVATE src)

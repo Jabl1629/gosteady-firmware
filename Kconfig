@@ -37,4 +37,32 @@ config GOSTEADY_FIELD_MODE
 
 	    west build -b thingy91x/nrf9151/ns -- -DEXTRA_CONF_FILE=prj_field.conf
 
+config GOSTEADY_CLOUD_ENABLE
+	bool "Enable AWS IoT MQTT/TLS cloud bring-up"
+	default n
+	help
+	  When enabled, src/cloud.c is compiled and main() spawns the
+	  one-shot heartbeat publisher worker on boot. The publisher
+	  waits for cellular registration + network time, opens an MQTT/
+	  TLS connection to AWS IoT Core (cert at sec_tag 201, provisioned
+	  via tools/flash_cert.py), publishes one heartbeat to
+	  gs/{client_id}/heartbeat, and exits.
+
+	  Default off so bench data-collection runs (M8 captures via
+	  capture.html / pull_sessions.py) are undisturbed by cellular
+	  activity at boot. The ~78 KB of aws_iot + mqtt_helper + mbedTLS
+	  + TLS sockets that come along with this Kconfig are also paid
+	  for only in builds that opt in.
+
+	  Three build configurations:
+
+	    west build                                              # bench, no cloud — default M8 data-collection workflow
+	    west build -- -DEXTRA_CONF_FILE=prj_cloud.conf          # bench + cloud — for M12.1c.1+ on-device cloud testing
+	    west build -- -DEXTRA_CONF_FILE=prj_field.conf          # deployment — FIELD_MODE + cloud
+
+	  prj_field.conf includes the cloud block inline so deployment
+	  builds need only the single overlay; prj_cloud.conf is the
+	  same block factored out for bench cloud-testing without
+	  pulling in FIELD_MODE.
+
 endmenu
