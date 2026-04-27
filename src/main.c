@@ -206,6 +206,49 @@ static int configure_bmi270(void)
 	return 0;
 }
 
+/* ---- Phase 1b: BMI270 power management (suspend between sessions) ----
+ *
+ * The BMI270 is the algorithm's primary sensor and runs at 100 Hz when a
+ * session is active. Between sessions the chip has nothing useful to
+ * sample, but at normal-mode current draw (~325 µA continuous per
+ * datasheet) it's the dominant idle term in the deployment power
+ * budget. Suspended (PWR_CTRL.ACC_EN=0, GYR_EN=0) it draws ~0.5 µA —
+ * roughly 600× less.
+ *
+ * `sensor_attr_set(SAMPLING_FREQUENCY=0)` is the documented Zephyr way
+ * to suspend on this driver: see drivers/sensor/bosch/bmi270/bmi270.c
+ * `set_accel_odr_osr` (and the gyro equivalent) — `odr_bits == 0` clears
+ * the corresponding ENABLE bit in PWR_CTRL. Setting it back to 100 Hz
+ * re-enables the chip (the ODR/range/oversampling registers retain
+ * their values across the disable, so we don't have to re-run the full
+ * configure_bmi270() sequence).
+ *
+ * Resume timing: per BMI270 datasheet, the accelerometer needs a few ms
+ * to produce valid data after PWR_CTRL.ACC_EN goes low → high. The
+ * sampler thread's natural 10 ms tick gives some headroom, but we
+ * explicitly settle and discard the first sample after resume to avoid
+ * any first-sample staleness regression in M5/M6/M10 paths. */
+static int bmi270_set_active(bool on)
+{
+	struct sensor_value freq = {
+		.val1 = on ? 100 : 0,
+		.val2 = 0,
+	};
+	int ret = sensor_attr_set(bmi270, SENSOR_CHAN_ACCEL_XYZ,
+				   SENSOR_ATTR_SAMPLING_FREQUENCY, &freq);
+	if (ret < 0) {
+		LOG_ERR("bmi270 accel %s failed (%d)", on ? "resume" : "suspend", ret);
+		return ret;
+	}
+	ret = sensor_attr_set(bmi270, SENSOR_CHAN_GYRO_XYZ,
+			       SENSOR_ATTR_SAMPLING_FREQUENCY, &freq);
+	if (ret < 0) {
+		LOG_ERR("bmi270 gyro %s failed (%d)", on ? "resume" : "suspend", ret);
+		return ret;
+	}
+	return 0;
+}
+
 /* ---- Button plumbing ---- */
 
 static void button_isr(const struct device *port, struct gpio_callback *cb, uint32_t pins)
@@ -256,17 +299,90 @@ static void sampler_entry(void *p1, void *p2, void *p3)
 	 * we can capture the start timestamp exactly once at transition. */
 	bool was_active = false;
 
+	/* Phase 1b: count of leading samples to drop after BMI270 resume.
+	 *
+	 * Empirically determined on bench 2026-04-27: the chip needs
+	 * ~4-5 ODR periods past the 25 ms settle window before its data
+	 * registers report fresh values rather than register-reset zeros.
+	 * Logging the dropped samples directly during debug showed:
+	 *   drop iter 1 (~26 ms post-resume): zeros
+	 *   drop iter 2 (~26 ms post-resume, catch-up): zeros
+	 *   drop iter 3 (~37 ms post-resume): zeros
+	 *   drop iter 4 (~46 ms post-resume): real gravity sample
+	 *   drop iter 5 (~57 ms post-resume): real gravity sample
+	 *
+	 * Dropping 4 = guarantees we discard all zero-residue samples
+	 * with one extra iteration of safety margin. First persisted
+	 * sample lands ~50 ms post-resume with valid data. Cost: 4
+	 * missing samples at start of every session = 40 ms of data,
+	 * immaterial to the M9 algorithm (motion gate has 500 ms
+	 * settling window before peaks count). */
+	uint32_t samples_to_drop = 0;
+
 	while (1) {
 		bool active = gosteady_session_is_active();
 
 		if (active && !was_active) {
+			/* Phase 1b: idle→active transition. Resume BMI270
+			 * (was suspended between sessions to save ~325 µA),
+			 * settle for ≥2 ODR periods, discard fetches to
+			 * clear any stale data left in the chip's data
+			 * registers from before suspend, then start
+			 * capturing.
+			 *
+			 * Settle width chosen empirically: at 100 Hz ODR
+			 * one period is 10 ms. After PWR_CTRL.ACC_EN goes
+			 * 0→1 the chip needs at least one full period
+			 * before fresh samples are available. With only 5 ms
+			 * settle + 1 prime fetch we observed the first
+			 * captured sample of the very-first-after-boot
+			 * session reading all zeros (residual register
+			 * state). 25 ms + 2 prime fetches guarantees ≥2
+			 * full ODR periods elapse and at least one fresh
+			 * sample lands in the data registers before the
+			 * "real" fetch in the body below.
+			 *
+			 * Cost: only the first iteration of every session
+			 * pays this — subsequent iterations run at the
+			 * normal 10 ms tick. Session timestamp is
+			 * unaffected (session_base_ms captures AFTER the
+			 * settle; first persisted sample is t_ms ≈ 0). */
+			if (bmi270_set_active(true) == 0) {
+				LOG_INF("bmi270: resumed for session");
+			}
+			k_msleep(25);
+			(void)sensor_sample_fetch(bmi270); /* prime 1, discard */
+			(void)sensor_sample_fetch(bmi270); /* prime 2, discard */
 			session_base_ms = k_uptime_get_32();
+			samples_to_drop = 4; /* see comment at samples_to_drop decl */
+		} else if (!active && was_active) {
+			/* Phase 1b: active→idle transition. Session is
+			 * stopped and the writer thread has flushed and
+			 * closed the file (gosteady_session_stop is
+			 * synchronous on the writer's stop_done_sem per the
+			 * 2026-04-25 race fix). Safe to suspend BMI270
+			 * now — no in-flight reads. */
+			if (bmi270_set_active(false) == 0) {
+				LOG_INF("bmi270: suspended (idle)");
+			}
 		}
 		was_active = active;
 
-		if (sensor_sample_fetch(bmi270) == 0 &&
+		/* Skip the SPI fetch entirely when not active — chip is
+		 * suspended and the read would either fail or return
+		 * stale data, and we'd discard it anyway. Saves SPI bus
+		 * traffic + CPU cycles on every idle tick. */
+		if (active &&
+		    sensor_sample_fetch(bmi270) == 0 &&
 		    sensor_channel_get(bmi270, SENSOR_CHAN_ACCEL_XYZ, accel) == 0 &&
-		    sensor_channel_get(bmi270, SENSOR_CHAN_GYRO_XYZ, gyro) == 0 && active) {
+		    sensor_channel_get(bmi270, SENSOR_CHAN_GYRO_XYZ, gyro) == 0) {
+
+			/* Drop the leading post-resume samples that come back
+			 * as all-zeros from the chip's data registers. */
+			if (samples_to_drop > 0) {
+				samples_to_drop--;
+				goto schedule_next;
+			}
 
 			struct gosteady_sample s = {
 				.t_ms = k_uptime_get_32() - session_base_ms,
@@ -283,6 +399,7 @@ static void sampler_entry(void *p1, void *p2, void *p3)
 			}
 		}
 
+schedule_next:
 		next += SAMPLE_PERIOD_MS;
 		int32_t delay = (int32_t)(next - k_uptime_get_32());
 		if (delay > 0) {
@@ -559,6 +676,25 @@ int main(void)
 	if (!device_is_ready(adxl367)) { LOG_ERR("adxl367 device not ready"); return -ENODEV; }
 
 	if ((ret = configure_bmi270()) < 0) { return ret; }
+	/* Phase 1b: configure_bmi270() leaves the chip running at 100 Hz —
+	 * suspend immediately so the chip is idle until a session opens.
+	 * Saves ~325 µA between sessions. The suspend keeps all the
+	 * config registers (range, OSR, ODR target) intact; the resume
+	 * on session start just flips PWR_CTRL.{ACC_EN,GYR_EN} back on.
+	 *
+	 * BUT: must let the chip take at least one real sample BEFORE
+	 * the boot-time suspend, otherwise its data registers go into
+	 * suspend holding whatever-was-there-at-power-on (zeros) and
+	 * the very-first-after-boot session's first sample reads as
+	 * (0,0,0). 30 ms = 3 ODR periods at 100 Hz — generous margin
+	 * to guarantee fresh gravity samples sit in the data registers
+	 * before suspend takes over. Subsequent suspend/resume cycles
+	 * preserve the last pre-suspend sample, so this only matters at
+	 * cold boot. (One-time 30 ms cost at boot; doesn't recur.) */
+	k_msleep(30);
+	if (bmi270_set_active(false) == 0) {
+		LOG_INF("bmi270: suspended at boot (idle until session start)");
+	}
 	if ((ret = configure_button()) < 0) { return ret; }
 	/* Phase 1a: arm the ADXL367 wake-on-motion path. Failure is
 	 * non-fatal — the M2-era 1Hz sanity poll is gone, but motion-
