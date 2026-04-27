@@ -300,7 +300,7 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
 10. **C port** — move the estimator on-device. *(done 2026-04-25 — `src/algo/{gs_filters,gs_motion_gate,gs_step_detector,gs_roughness,gs_pipeline}.h/c` + auto-generated `gosteady_algo_params.h`. Wired into `src/session.c` writer thread; emits two `ALGO_V1{A,B}` log lines at session close with distance_ft, R, surface_class, step_count, motion_s, total_s, motion_frac, overflow flag. Host regression suite (`tests/host/`, `make`-driven, no Zephyr/CMSIS dep) runs against the three M10 reference vectors and passes 31/31 checks within float32-vs-float64 tolerance. Firmware version bumped to `0.6.0-algo`. Stationary on-device validation passes (0 steps / 0 ft / NaN R, exactly mirroring `indoor_run09` fixture). Walking-path on-device validation **passes** (2026-04-25 ~18 s real walk: 12 peaks / R=0.056 / surface=indoor / distance=4.99 ft / motion_frac=43%; cadence 0.66 Hz matches characterized 0.4–0.7 Hz gait band; firmware_version=`0.6.0-algo` stamped in the pulled session header).)*
 10.5. **Field deployment requirements** — define the firmware capability set + cloud contract for the first remote deployment (3 Thingy:91 X units, rehab clinic, ~1 month, cellular only, no charging, no OTA, no user interaction). Drives M11–M14 sequencing. *(active in parallel with M10 — see "Field Deployment (M10.5)" section + "Portal Scope Impact" section.)*
 11. **Validation** — hold-out error characterization. (Algorithm-side: re-run cross-surface LOO with M10 C outputs from reference vectors; deployment-side: continuous in-field comparison against any clinic-supplied ground truth.)
-12. **Cellular** — LTE-M / NB-IoT link up on nRF9151. (Scoped by M10.5: MQTT/TLS to AWS IoT Core, hourly heartbeat, session-end activity uplink, opportunistic snippet flush. Sub-milestones: **M12.1a (modem attach + signal stats + AT+CCLK? time) DONE 2026-04-26**; M12.1b (refine reporter cadence + PSM enter/exit logging) deferred until 1c lands; **M12.1c — MQTT/TLS to AWS IoT Core + first heartbeat publish to `gs/{serial}/heartbeat`**, requires per-device cert provisioning into the nRF9151 modem (sec_tag 16842753-style flow); M12.1d — activity uplink on session close; M12.1e — pre-activation gate + `gs/{serial}/cmd` activation downlink; M12.1f — snippet uplink on `gs/{serial}/snippet` once snippet capture path lands.)
+12. **Cellular** — LTE-M / NB-IoT link up on nRF9151. (Scoped by M10.5: MQTT/TLS to AWS IoT Core, hourly heartbeat, session-end activity uplink, opportunistic snippet flush. Sub-milestones: **M12.1a (modem attach + signal stats + AT+CCLK? time) DONE 2026-04-26**; M12.1b (refine reporter cadence + PSM enter/exit logging) deferred until 1c lands; **M12.1c — MQTT/TLS to AWS IoT Core + first heartbeat publish to `gs/{serial}/heartbeat`**, unblocked 2026-04-26 — needs the 3 cert sets cloud team is minting + endpoint hostname `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com`:8883 + Amazon Root CA 1 pin per coord doc §C.4.1–§C.4.2; M12.1d — activity uplink on session close; **M12.1e — pre-activation gate + `gs/{serial}/cmd` activation downlink + Device Shadow `desired.activated_at` re-check on every cellular wake** (per coord doc §C.4.4 — Shadow chosen over MQTT-retained for forward-compat with future per-device knobs; firmware needs to confirm NCS 3.2.4 `aws_iot` Shadow lib support per §C.5.1, fallback is MQTT-retained if it turns out painful); M12.1f — snippet uplink on `gs/{serial}/snippet` with the JSON-header framing from §F.3 + binary layout from §F.4 once snippet capture path lands.)
 13. **Cloud backend** — session telemetry upload. (Coordinated with portal Phase 1A/1B — already specified; firmware-side work is the on-device side of the contract.)
 14. **Production telemetry** — battery (nPM1300 fuel gauge), error/fault counters, OTA hooks. (M10.5 defines what's required vs. nice-to-have for first deployment.)
 15. **Field testing.**
@@ -671,9 +671,17 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 | Item | Decision | Status |
 |---|---|---|
 | Device ID format | `GS` + 10 digits (e.g. `GS0000001234`). Used as MQTT client ID + IoT Thing Name. | Locked by portal spec |
+| First-3-unit serials | **`GS0000000001`, `GS0000000002`, `GS0000000003`** | **Locked 2026-04-26 (cloud, §C.4.3)** |
+| Reserved test/dev serial range | `GS9999999990–GS9999999999` (visually distinct, won't collide with low-range production) | **Locked 2026-04-26 (cloud)** |
 | Auth (first 3 units) | Per-device cert + private key flashed manually at build time, stored in nRF9151 CryptoCell-312 / TF-M secure element. | **Locked 2026-04-25** — defers AWS IoT fleet provisioning for first deployment |
+| Cert generation flow | **Option (a) cloud-generates-and-sends.** Cloud team runs `aws iot create-keys-and-certificate --set-as-active`, creates per-thing IoT Thing + per-thing IoT policy, hands off cert PEM + private key PEM via 1Password shared item (one per device, named by serial, 7-day expiry). Firmware writes via `AT%CMNG=0,<sec_tag>,...` at flash time. | **Locked 2026-04-26 (cloud, §C.4.1)** |
+| Per-thing IoT policy actions | `iot:Connect` on own thing, `iot:Publish` on `gs/{serial}/{heartbeat,activity,snippet}`, `iot:Subscribe`+`Receive` on `gs/{serial}/cmd`, `iot:GetThingShadow`+`UpdateThingShadow` on own thing (added for §F.9.4 Shadow re-check). Nothing else. | **Locked 2026-04-26 (cloud)** |
+| AWS IoT root CA pin | Amazon Root CA 1 — `https://www.amazontrust.com/repository/AmazonRootCA1.pem`. No rotation without coordination here first. | **Locked 2026-04-26 (cloud)** |
+| AWS IoT MQTT endpoint (dev) | `a2dl73jkjzv6h5-ats.iot.us-east-1.amazonaws.com`, port 8883 | **Locked 2026-04-26 (cloud, §C.4.2)** |
+| AWS IoT MQTT endpoint (prod) | TBD — separate AWS account per Phase 1.5 multi-account plan, separate hostname. Per-env Kconfig + separate firmware builds (e.g. `CONFIG_GOSTEADY_IOT_ENDPOINT_PROD`). | **Approach locked 2026-04-26**; prod hostname pending |
 | Auth (post-first-deployment) | AWS IoT Fleet Provisioning with claim cert at flash time + CSR exchange on first boot | Deferred to portal Phase 5A coordination |
 | First-boot binding | Cloud-side state machine: `ready_to_provision` → `provisioned` → `active_monitoring` driven by first-heartbeat | Portal-side; no firmware action beyond "send heartbeat normally" |
+| Manufacturer-side enrollment workflow | **Two-step.** Short-term (first ≤10 units): private companion firmware repo with checked-in `device-registry.csv` (`serial, cert_fingerprint, flash_date, firmware_version`); cloud team has read access; per-shipment Slack ping triggers cloud team to bulk-import CSV → `ready_to_provision` Registry rows. Long-term (post-Phase 2A): firmware flash script calls `POST /admin/devices` directly. CSV becomes audit trail. | **Locked 2026-04-26 (cloud, §C.4.5)** — repo creation pending firmware-side |
 
 ### Pre-activation behavior
 
@@ -688,6 +696,10 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 | Ack semantics | Heartbeat-side `last_cmd_id` echo IS the ack. Cloud's heartbeat handler matches it against most-recent issued `activate` cmd → marks `Device Registry.activated_at` and emits `device.activated` audit event. | **Locked 2026-04-17 (portal)** |
 | Pre-activation heartbeats | Cloud accepts them, updates Device Shadow normally, **suppresses synthetic alerts** until `activated_at` is set (no patient → no caregiver → all alerts are noise). Sampled audit log at 1/hr/serial. Firmware can publish freely without producing user-facing noise. | **Locked 2026-04-17 (portal)** |
 | Failure modes | Cloud publish fails → portal returns 500 to caregiver; provision is idempotent so retry republishes a fresh `cmd_id`. Firmware never echoes → cloud surfaces "stuck in `provisioned` >24h" via ops alarm. | **Locked 2026-04-17 (portal)** |
+| `last_cmd_id` ack matching breadth | Cloud's heartbeat handler matches `last_cmd_id` against any `cmd_id` issued to the serial **within the last 24 h**, not just the most recent — handles benign portal-retry windows where two `cmd_id`s are in flight. Firmware always echoes the most-recently-received `cmd_id`; cloud's matching is the lenient side. | **Locked 2026-04-26 (cloud, §C.2 / D14a)** |
+| Re-check on every cellular wake | **Device Shadow `desired.activated_at`** (NOT MQTT retained — chosen for forward-compat with future per-device knobs like sampling rate, thresholds, OTA gating). Cloud writes `desired.activated_at` ISO 8601 timestamp at provision-time AND publishes the immediate-push `activate` cmd. Firmware on every cellular wake: `GET` shadow → read `desired.activated_at` → if non-null & matches on-flash value → normal operation; else → re-enter pre-activation, blue LED on, no session capture. Firmware writes `reported.activated_at` to confirm device-side persistence after every state change. | **Locked 2026-04-26 (cloud, §C.4.4)** — firmware-side build path subject to NCS Shadow library check (see §C.5.1, currently OPEN below) |
+| Cloud-side invariant | `desired.activated_at` is non-null **iff** Device Registry status ∈ {`provisioned`, `active_monitoring`}. Every transition out of those states writes `desired.activated_at = null`. So a de-provisioned / RMA'd device firmware re-checking shadow naturally re-enters pre-activation. | **Locked 2026-04-26 (cloud)** |
+| Stray `activate` cmd handling | If firmware receives an `activate` cmd it didn't expect (no preceding cmd_id in its issuance log), treat as authoritative + persist + ack normally. Cloud is the canonical issuance authority; firmware shouldn't second-guess. | **Locked 2026-04-26 (cloud)** |
 
 ### Transport & topics
 
@@ -741,7 +753,7 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 | MQTT user properties (required) | `snippet_id` (firmware-generated UUID for idempotency), `window_start_ts` (ISO 8601 UTC) | **Locked 2026-04-17 (portal)** |
 | MQTT user properties (optional) | `anomaly_trigger ∈ {session_sigma, R_outlier, high_g}`. Absent for scheduled snippets. | **Locked 2026-04-17 (portal)** |
 | MQTT version assumption | Cloud spec assumes MQTT 5 user properties. **Verify NCS MQTT client support** — if only 3.1.1, fall back to small JSON header inside the binary payload. | **Action item** (firmware side) |
-| Cloud routing | IoT Rule with direct S3 action — no Lambda. Lands at `s3://gosteady-{env}-snippets/{serial}/{date}/{snippet_id}.bin`. AWS-managed SSE encryption. | **Locked 2026-04-17 (portal)** |
+| Cloud routing | **IoT Rule + thin Python Lambda** that parses the 4-byte length-prefix + JSON header, then writes the full payload to `s3://gosteady-{env}-snippets/{serial}/{date}/{snippet_id}.bin` (full payload = JSON header + binary body, keeps S3 object self-describing for offline analytics). AWS-managed SSE encryption. **The "no Lambda in path" claim from the original 2026-04-17 doc no longer holds** — IoT Rule SQL alone can't extract `snippet_id` from a binary preamble for the S3 key. Negligible cost (~720 invocations/month at expected v1 cadence). No firmware-side change. | **Locked 2026-04-26 (cloud, §C.2 update from §C.2 §F.3 ack)** |
 | Retention | 90 days hot Standard → Glacier; 13-month total before delete (aligned with v1.5 retrain need). | **Locked 2026-04-17 (portal)** |
 | Audit | Every upload generates a `device.snippet_uploaded` event. | **Locked 2026-04-17 (portal)** |
 | v2 migration heads-up | If snippet size exceeds 100 KB later (longer windows, multi-sensor), switch to S3 presigned-URL flow (same pattern as OTA). MQTT topic deprecates then. **No v1 changes anticipated.** | Informational |
@@ -773,13 +785,36 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 
 ### Open coordination items
 
-**Moved to the shared coordination doc 2026-04-26.** See `gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md` (and any subsequent dated entries below it) for the live conversation record. The append-only convention means every dated entry stays as a permanent record — search the file for the latest entry from each team to see current status.
+**Canonical record:** `gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md` (append-only conversation; search for the latest entry from each team to see current status).
 
-Brief current state (full detail in the shared doc):
+**Conversation timeline (each entry shipped as a single commit on `feature/infra-scaffold` of `gosteady-portal`):**
 
-- All four items the portal team flagged on 2026-04-17 (activation contract, heartbeat extras, activity extras, snippet upload schema) — **resolved** in their 2026-04-17 entry; firmware acknowledged in the 2026-04-26 entry.
-- Cloud team's 6 action items for firmware (last_cmd_id ack, MQTT 5 user properties, snippet binary layout, site-survey timeline, pre-activation LED, serial number enrollment) — **all six answered firmware-side in the 2026-04-26 entry**.
-- New firmware-team questions pending cloud response (cert provisioning workflow, AWS IoT endpoint URL + Root CA confirmation, starting serial range, pre-activation cmd-listen-window contract, snippet payload encryption posture) — **logged in the 2026-04-26 entry**, awaiting portal response.
+| Date | Team | Section refs | Summary |
+|---|---|---|---|
+| 2026-04-17 | Cloud | §1–§9 | First batch — activation contract, heartbeat / activity extras, snippet upload schema, time sync, pre-activation handling. 4 firmware-side action items. |
+| 2026-04-26 | Firmware | §F.1–§F.10 | Acknowledged 2026-04-17 batch + answered all 6 cloud action items. Announced M12.1a complete on bench. **5 new firmware-side questions** for cloud (cert flow, IoT endpoint, starting serials, re-check-on-wake mechanism, manufacturer enrollment). |
+| 2026-04-26 | Cloud | §C.1–§C.6 | Acknowledged firmware response. **All 6 §F.9 questions answered with decisions** (folded into the tables above). 3 new cloud-side asks back at firmware. |
+
+**Currently-open items (all firmware-side action):**
+
+1. **§C.5.1 — Confirm NCS 3.2.4 `aws_iot` library Shadow get/update support.** Gates the M12.1e build path (Device Shadow `desired.activated_at` re-check). Cloud's quick read suggests yes (`AWS_IOT_SHADOW_TOPIC_GET` + `aws_iot_shadow_update_accepted` event flow), but firmware needs to verify on bench. If Shadow turns out to be painful in NCS 3.2.4, fallback is MQTT-retained `activate` cmd. **Investigate when M12.1c heartbeat publish lands.**
+2. **§C.5.2 — Heartbeat clock drift characterization (deferred follow-up).** After M12.1c is up and a few weeks of heartbeats are flowing, post a one-paragraph note on observed AT+CCLK? drift across PSM cycles + sub-second precision. Helps cloud-side anomaly detection threshold tuning. Not a blocker.
+3. **§C.5.3 — Pre-activation battery cost per cycle (deferred follow-up).** After M12.1c gives empirical numbers, report rough mC per modem-attach + heartbeat + Shadow-get + sleep cycle. If high, cloud may add a "stuck in pre-activation > 7 days" alarm threshold. Not a spec change. Not a blocker.
+
+**Cloud-side commitments inflight (committed by them within ~1 working day from 2026-04-26):**
+
+- Mint cert + key for `GS0000000001/2/3` and attach per-thing IoT policies
+- DM the three 1Password shared items (one per serial, 7-day expiry)
+- Pre-create the three `ready_to_provision` Device Registry records
+- Reply in the shared doc once cert sets are ready
+
+**Cloud-side architectural follow-ups (within ~1 week, parallel to firmware M12.1c):**
+
+- Phase 1A revision spec update — snippet IoT Rule + Lambda redesign, Shadow `desired.activated_at` write hooks across state-machine transitions, cumulative requirement updates
+- Phase 1A revision deploy — `gs/{serial}/cmd` IoT policy, snippet S3 bucket, snippet parser Lambda, pre-activation alert suppression
+- CLI helper for Device Registry bulk-import from companion repo CSV
+
+**Firmware-side blockers cleared:** all 6 §F.9 items decided; M12.1c (first heartbeat publish) is now buildable as soon as the 3 cert sets land via 1Password.
 
 ---
 
