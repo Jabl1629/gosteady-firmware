@@ -9,6 +9,7 @@ target_sources(app PRIVATE
   src/dump.c
   src/control.c
   src/cellular.c
+  src/cloud.c
   src/algo/gs_filters.c
   src/algo/gs_motion_gate.c
   src/algo/gs_step_detector.c
