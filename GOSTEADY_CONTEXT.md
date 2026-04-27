@@ -313,7 +313,7 @@ The app rebuild-and-reflash cycle is the frequent path; the bridge only gets ref
    - **12.1c.2 Production-shaped heartbeat** — hourly cadence (`k_timer` + work item) + all locked optional extras (`last_cmd_id`, `reset_reason`, `fault_counters`, `watchdog_hits`, `uptime_s`, `firmware`, `battery_mv`) + real `battery_pct` from 10.7.2 + populated `reset_reason` / `fault_counters` / `watchdog_hits` from 10.7.3. NEW 2026-04-27.
    - **12.1d Activity uplink on session close** — payload to `gs/{serial}/activity` with `serial`, `session_start`, `session_end`, `steps`, `distance_ft`, `active_min` + optional `roughness_R`, `surface_class`, `firmware_version` (per coord doc §F.3). Reuses 12.1c plumbing entirely; cheap once 12.1c is up. ~1 day.
    - **12.1e.1 NCS Shadow lib bench confirmation** — *micro-milestone, ~half day*. Verifies §C.5.1: `aws_iot_shadow_get` + `aws_iot_shadow_update` work in NCS 3.2.4 against a stub Thing in dev IoT account. If yes → 12.1e.2 uses Shadow per §C.4.4. If no → fallback is MQTT-retained `activate` cmd (cloud-side option still on the table per §C.4.4 fallback paragraph). NEW 2026-04-27.
-   - **12.1e.2 Pre-activation gate + Shadow re-check** — refuses session capture until first activation cmd received; blue LED slow-blink while in `ready_to_provision`; Shadow `desired.activated_at` re-check on every cellular wake (per §C.4.4); persists `activated_at` to flash; echoes `cmd_id` on next heartbeat as ack. Depends on 12.1e.1 outcome. ~2 days.
+   - **12.1e.2 Pre-activation gate + Shadow re-check** — refuses session capture until first activation cmd received; blue LED slow-blink while in `ready_to_provision`; Shadow `desired.activated_at` re-check on every cellular wake (per §C.4.4); persists `activated_at` to flash; echoes `cmd_id` on next heartbeat as ack. Depends on 12.1e.1 outcome AND on **cloud-side Phase 1B revision deploy** (heartbeat handler writing `reported.{...}` to Shadow + threshold-detector consuming shadow-delta + activation-ack consumer) per coord §C4.1/§C4.2. Cloud team commits to landing before firmware reaches this milestone. ~2 days firmware work.
    - **12.1f Snippet uplink** — JSON-header framing per §F.3 + binary layout per §F.4 (4-byte BE length-prefix + JSON header + 16-byte payload header + 28-byte sample records). Opportunistic upload piggybacking on Priority-1 cellular wakes per M10.5 snippet upload policy. Depends on 10.7.1. ~3 days.
 13. **Cloud backend** — session telemetry upload. (Coordinated with portal Phase 1A/1B — largely cloud-side; firmware-side responsibilities live in M12.)
 14. **Final production telemetry** — *renamed from "Production telemetry" 2026-04-27*. With nPM1300 + crash forensics moved to M10.7 (because they're prereqs for the production-shaped heartbeat / no-OTA-safety-net respectively, both required before site-survey ship), M14 becomes the future-work bucket: OTA hooks (AWS IoT Jobs + S3 + MCUboot signing), unit-4+ telemetry hardening, post-first-deployment iterations.
@@ -738,7 +738,7 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 | Required payload fields | `serial`, `ts` (ISO 8601 UTC), `battery_pct` (0.0–1.0), `rsrp_dbm` (−140 to 0), `snr_db` (−20 to 40) | Locked by portal spec |
 | Optional payload fields | `battery_mv`, `firmware` (semver string), `uptime_s`, `last_cmd_id` (echoes most-recent downlink cmd — used for activation ack), `reset_reason`, `fault_counters` (object), `watchdog_hits` (int) | **Locked 2026-04-17 (portal)** — all formerly "firmware-added" extras now explicitly listed in `ARCHITECTURE.md §7` |
 | Cloud handling of unknown fields | **Accept-all**: any unknown field is persisted to Device Shadow `reported` state alongside named fields. Validation rejects only on missing required fields or out-of-range required values. Crash-forensics extras are queryable via Shadow. | **Locked 2026-04-17 (portal)** |
-| Storage in cloud | AWS IoT Device Shadow `reported` state (not DynamoDB direct write) | Locked by portal spec |
+| Storage in cloud | **Target post-1B-revision:** AWS IoT Device Shadow `reported` state. **Currently deployed (2026-04-27):** OLD heartbeat-processor Lambda writes Device Registry DDB row directly via `UpdateItem` — verified via M12.1c.1 sub-task 0 acceptance probe. Cloud team owns the migration via Phase 1B revision (`gosteady-portal/docs/specs/phase-1b-revision.md`); committed to landing before firmware reaches M12.1e.2 per coord §C4.1. Functionally inert for M12.1c.1/.2 (firmware just publishes); M12.1e.2 is the milestone that actually depends on Shadow being live. | **Spec target locked; impl drift acknowledged + scheduled for fix 2026-04-27 (coord §C4.1)** |
 
 ### Activity uplink
 
@@ -811,12 +811,25 @@ Other portal-side authoritative spec sources: `~/Library/Mobile Documents/com~ap
 | 2026-04-17 | Cloud | §1–§9 | First batch — activation contract, heartbeat / activity extras, snippet upload schema, time sync, pre-activation handling. 4 firmware-side action items. |
 | 2026-04-26 | Firmware | §F.1–§F.10 | Acknowledged 2026-04-17 batch + answered all 6 cloud action items. Announced M12.1a complete on bench. **5 new firmware-side questions** for cloud (cert flow, IoT endpoint, starting serials, re-check-on-wake mechanism, manufacturer enrollment). |
 | 2026-04-26 | Cloud | §C.1–§C.6 | Acknowledged firmware response. **All 6 §F.9 questions answered with decisions** (folded into the tables above). 3 new cloud-side asks back at firmware. |
+| 2026-04-27 | Cloud | §C2 + §C3 | Cert bundle minted + delivered (path-corrected to filesystem in §C3 for single-dev setup). 4 cert+key pairs ready: bench `GS9999999999` + shipping `GS0000000001/2/3`. |
+| 2026-04-27 | Firmware | §F2.1–§F2.6 | M12.1c.1 sub-task 0 complete (cloud heartbeat path validated end-to-end without firmware via `aws iot-data publish`). Raised §F2.3 spec drift question (heartbeat storage = Shadow per spec vs DDB per impl). Renumbering heads-up §F2.5. |
+| 2026-04-27 | Cloud | §C4.1–§C4.7 | **§F2.3 resolved as Option 2** — OLD heartbeat Lambda is pre-revision; spec describes post-1B-revision target; cloud commits to deploying 1B revision before firmware reaches M12.1e.2. §C4.3 ran threshold-detector probe (logic intact; PutItem fails on patientId-keyed alerts table — 1B-rev fix). §C4.4 covers minor §F2.4 items (uptimeS default-fill also fixed in 1B-rev). |
 
 **Currently-open items (all firmware-side action):**
 
 1. **§C.5.1 — Confirm NCS 3.2.4 `aws_iot` library Shadow get/update support.** Gates the M12.1e.2 build path (Device Shadow `desired.activated_at` re-check). Cloud's quick read suggests yes (`AWS_IOT_SHADOW_TOPIC_GET` + `aws_iot_shadow_update_accepted` event flow), but firmware needs to verify on bench. If Shadow turns out to be painful in NCS 3.2.4, fallback is MQTT-retained `activate` cmd. **Now formalized as micro-milestone M12.1e.1 in the arc; sequenced after M12.1c.2 production-shaped heartbeat lands.**
 2. **§C.5.2 — Heartbeat clock drift characterization (deferred follow-up).** After M12.1c.2 is up and a few weeks of heartbeats are flowing, post a one-paragraph note on observed AT+CCLK? drift across PSM cycles + sub-second precision. Helps cloud-side anomaly detection threshold tuning. Not a blocker.
 3. **§C.5.3 — Pre-activation battery cost per cycle (deferred follow-up).** After M12.1c.2 gives empirical numbers, report rough mC per modem-attach + heartbeat + Shadow-get + sleep cycle. If high, cloud may add a "stuck in pre-activation > 7 days" alarm threshold. Not a spec change. Not a blocker.
+
+**Resolved 2026-04-27 (firmware §F2 ↔ cloud §C4 exchange):**
+
+- ✅ **§F2.3 heartbeat storage drift** — answer is Option 2 (deployed Lambda is pre-revision; spec describes post-1B-revision target). Cloud commits to landing Phase 1B revision before firmware reaches M12.1e.2. Tracked above in heartbeat uplink table "Storage in cloud" row.
+- ✅ **§F2.4a uptimeS default-fill** — also resolved by Phase 1B revision (Lambda 4 spec D16: missing fields stay missing in Shadow, no default-fill).
+- ✅ **§F2.4b threshold-detector probe** — cloud ran it (§C4.3); logic fires correctly, PutItem fails post-0B-rev because alerts table is `patientId`-keyed. Phase 1B revision fix. Not a firmware concern.
+
+**Cloud-side commitments inflight (per §C4.7):**
+
+- 🔄 **Phase 1B revision deploy** — heartbeat handler slimmed to Shadow update + activation-ack only; new threshold-detector Lambda triggered by shadow-delta. Target: 1-2 cloud-side dev sessions; commits to landing before firmware reaches M12.1e.2.
 
 **Cloud-side commitments — DONE 2026-04-27** (per cloud entries §C2 + §C3):
 
