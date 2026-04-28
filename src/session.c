@@ -31,6 +31,8 @@
 #include "session.h"
 
 #include "algo/gs_pipeline.h"
+#include "cellular.h"
+#include "cloud.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -41,6 +43,12 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
+
+/* Single source of truth for firmware version string; mirrored into the
+ * session header (FIRMWARE layer) and the M12.1d activity uplink payload
+ * so cloud-side queries can correlate the two. Bumped 2026-04-27 from
+ * "0.6.0-algo" to "0.7.0-cloud" with the M12.1c cloud bring-up. */
+#define GS_FIRMWARE_VERSION_STR "0.7.0-cloud"
 
 LOG_MODULE_REGISTER(gs_session, LOG_LEVEL_INF);
 
@@ -72,6 +80,12 @@ static struct gosteady_session_header s_header;
 static uint32_t          s_session_start_uptime_ms;
 static uint32_t          s_sample_count;
 static uint16_t          s_dropped_samples;
+
+/* M12.1d: cellular UTC at session start, captured for inclusion in the
+ * activity uplink payload (session_start field per coord §C.7). Empty
+ * string if cellular wasn't ready at start time — activity uplink uses
+ * empty string and cloud-side handler treats it as missing. */
+static char              s_session_start_utc_iso[24];
 
 /* M10 V1 distance estimator. Lives in .bss (~60 KB for the buffered
  * sample window). Owned exclusively by the writer thread between
@@ -334,7 +348,7 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 	ret = gen_uuid_v4(s_header.session_uuid);
 	if (ret < 0) { return ret; }
 	copy_ascii_field(s_header.device_serial,    sizeof(s_header.device_serial),    "TH91X-0001");
-	copy_ascii_field(s_header.firmware_version, sizeof(s_header.firmware_version), "0.6.0-algo");
+	copy_ascii_field(s_header.firmware_version, sizeof(s_header.firmware_version), GS_FIRMWARE_VERSION_STR);
 	copy_ascii_field(s_header.sensor_model,     sizeof(s_header.sensor_model),     "BMI270");
 	s_header.sample_rate_hz        = 100;
 	s_header.accel_range_g         = 4;
@@ -366,7 +380,23 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 	s_dropped_samples         = 0;
 	s_active                  = true;
 
-	LOG_INF("session start uuid=%s file=%s", uuid_str, path);
+	/* M12.1d: capture cellular UTC for the activity uplink's session_start
+	 * field. Best-effort — if cellular isn't ready (modem still attaching,
+	 * NITZ not yet received), leave the buffer empty and the activity
+	 * payload will publish with session_start="" (cloud handler treats
+	 * empty as missing per accept-all contract). M12.1c.1 normally has
+	 * cellular up by the time any session opens, so this is mostly
+	 * defensive against early-boot session_start before modem registers. */
+	s_session_start_utc_iso[0] = '\0';
+	int t_err = gosteady_cellular_get_network_time(s_session_start_utc_iso,
+						       sizeof(s_session_start_utc_iso));
+	if (t_err) {
+		LOG_WRN("session_start: cellular UTC unavailable (%d) — activity will publish without session_start", t_err);
+	}
+
+	LOG_INF("session start uuid=%s file=%s start_utc=%s",
+		uuid_str, path,
+		s_session_start_utc_iso[0] ? s_session_start_utc_iso : "(unavailable)");
 	return 0;
 }
 
@@ -449,6 +479,57 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 			o->buffer_overflowed ? 1u : 0u);
 	} else {
 		LOG_WRN("ALGO_V1 uuid=%s no outputs (pipeline not seeded)", uuid_str);
+	}
+
+	/* M12.1d: enqueue activity uplink to cloud worker. Build the payload
+	 * struct from the M9 algo outputs + cellular UTC stamps. The publish
+	 * is fully async — gosteady_cloud_publish_activity returns after the
+	 * record is copied into the worker's msgq, never blocks on cellular.
+	 *
+	 * Skipped if:
+	 *   - CONFIG_GOSTEADY_CLOUD_ENABLE=n (default bench builds for M8 data
+	 *     collection — IS_ENABLED gates dead-code elimination)
+	 *   - algo outputs not valid (pipeline never seeded — typically a
+	 *     session that closed before any sample was processed)
+	 *
+	 * Empty session_start_utc / session_end_utc is OK at the schema layer
+	 * — cloud handler accepts and treats as missing per §C.7 accept-all
+	 * contract; firmware-side this just means cellular wasn't ready when
+	 * the corresponding event happened. */
+	if (IS_ENABLED(CONFIG_GOSTEADY_CLOUD_ENABLE) && s_pipeline_outputs_valid) {
+		const struct gs_pipeline_outputs *o = &s_pipeline_outputs;
+		struct gosteady_activity a = {0};
+		(void)snprintk(a.session_start_utc_iso, sizeof(a.session_start_utc_iso),
+			       "%s", s_session_start_utc_iso);
+		int end_err = gosteady_cellular_get_network_time(
+			a.session_end_utc_iso, sizeof(a.session_end_utc_iso));
+		if (end_err) {
+			LOG_WRN("session_stop: cellular UTC unavailable (%d) — activity session_end will be empty", end_err);
+			a.session_end_utc_iso[0] = '\0';
+		}
+		a.steps        = o->step_count;
+		a.distance_ft  = o->distance_ft;
+		/* active_min: round half-up from motion_duration_s/60. Cap at the
+		 * portal-contract max (1440 = 24 h) defensively; sessions are
+		 * normally minutes long so this only matters if something pinned
+		 * a session open across a day. */
+		{
+			double active_min_d = (double)o->motion_duration_s / 60.0 + 0.5;
+			if (active_min_d < 0.0)        { active_min_d = 0.0; }
+			if (active_min_d > 1440.0)     { active_min_d = 1440.0; }
+			a.active_min = (uint32_t)active_min_d;
+		}
+		a.roughness_R = o->roughness_R;          /* may be NaN — JSON omits */
+		a.surface_class =                         /* gs_surface_t passes through */
+			(o->step_count > 0) ? o->surface_class
+					    : GOSTEADY_ACTIVITY_SURFACE_UNKNOWN;
+		(void)snprintk(a.firmware_version, sizeof(a.firmware_version),
+			       "%s", GS_FIRMWARE_VERSION_STR);
+
+		int rc = gosteady_cloud_publish_activity(&a);
+		if (rc) {
+			LOG_WRN("activity enqueue failed: %d (session file still on flash)", rc);
+		}
 	}
 
 	if (out_sample_count != NULL) {
