@@ -36,6 +36,10 @@
 #include "battery.h"
 #endif
 
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+#include "forensics.h"
+#endif
+
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
 #define HEARTBEAT_PERIOD_MS  1000
@@ -861,6 +865,18 @@ int main(void)
 	uint32_t tick = 0;
 
 	LOG_INF("GoSteady firmware starting (build %s %s)", __DATE__, __TIME__);
+
+	/* M10.7.3: forensics first so the reset cause + fault frame from
+	 * any previous-boot crash is read before any other init can perturb
+	 * the hwinfo register or the crash_forensics partition. Also starts
+	 * the hardware watchdog so a hang during the rest of bring-up gets
+	 * caught. Non-fatal: the public getters return zero defaults if init
+	 * failed. */
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+	if (gosteady_forensics_init() < 0) {
+		LOG_WRN("forensics init failed — heartbeat extras will publish defaults");
+	}
+#endif
 
 	if ((ret = configure_led(&led_red,   "red"))   < 0) return ret;
 	if ((ret = configure_led(&led_green, "green")) < 0) return ret;

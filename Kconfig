@@ -65,4 +65,28 @@ config GOSTEADY_CLOUD_ENABLE
 	  same block factored out for bench cloud-testing without
 	  pulling in FIELD_MODE.
 
+config GOSTEADY_FORENSICS_ENABLE
+	bool "Enable crash forensics + watchdog (M10.7.3)"
+	default n
+	select WATCHDOG
+	select HWINFO
+	select REBOOT
+	help
+	  When enabled, src/forensics.c is compiled and gosteady_forensics_init()
+	  is called from main(). Captures reset cause via hwinfo at every boot,
+	  persists boot_count + fault_count + watchdog_hits to the
+	  `crash_forensics` external-flash partition (M10.7.1), and overrides
+	  the kernel's k_sys_fatal_error_handler to record the fault frame
+	  before the default reboot fires.
+
+	  Also starts a single-channel hardware watchdog (60 s timeout) kicked
+	  from a dedicated supervisor thread at 20 s cadence. If the kernel
+	  hangs for longer than the timeout the WDT triggers a reset, which
+	  the next boot reads back via hwinfo and increments watchdog_hits.
+
+	  Default off so bench data-collection runs aren't disturbed by the
+	  watchdog (which would fire if a debugger pauses the CPU mid-run
+	  beyond CONFIG_WDT_DISABLE_AT_BOOT semantics, or if a long-running
+	  test stalls the supervisor). Cloud + field builds opt in.
+
 endmenu
