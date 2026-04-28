@@ -43,10 +43,11 @@ LOG_MODULE_REGISTER(gs_cloud, LOG_LEVEL_INF);
  * mirrors what the upstream sample does. */
 #define CONNECT_WAIT      K_SECONDS(60)
 #define DISCONNECT_WAIT   K_SECONDS(10)
-#define POST_PUB_DRAIN    K_MSEC(500)   /* let QoS-0 PUBLISH hit the wire */
+#define PUBACK_WAIT       K_SECONDS(30)  /* QoS 1 PUBACK from AWS broker */
 
 static K_SEM_DEFINE(s_connected,    0, 1);
 static K_SEM_DEFINE(s_disconnected, 0, 1);
+static K_SEM_DEFINE(s_puback,       0, 1);
 
 static atomic_t s_initialized = ATOMIC_INIT(0);
 
@@ -75,6 +76,7 @@ static void aws_iot_event_handler(const struct aws_iot_evt *evt)
 		break;
 	case AWS_IOT_EVT_PUBACK:
 		LOG_INF("evt: PUBACK msg_id=%u", (unsigned)evt->data.message_id);
+		k_sem_give(&s_puback);
 		break;
 	case AWS_IOT_EVT_PINGRESP:
 		LOG_DBG("evt: PINGRESP");
@@ -187,8 +189,15 @@ static int publish_one_heartbeat(void)
 
 	LOG_INF("publish %s -> %s (len=%u)", topic, payload, (unsigned)payload_len);
 
+	/* QoS 1 — broker ACKs receipt; we wait on the PUBACK event before
+	 * disconnecting. The first end-to-end attempt (2026-04-27) used QoS 0
+	 * with a 500 ms drain before disconnect; under NB-IoT's high latency
+	 * the modem tore down TCP before the PUBLISH bytes hit the wire and
+	 * Lambda showed zero invocations. Switching to QoS 1 + PUBACK wait
+	 * makes "did the broker actually receive it" deterministic instead
+	 * of a tuned delay. */
 	struct aws_iot_data tx = {
-		.qos = MQTT_QOS_0_AT_MOST_ONCE,
+		.qos = MQTT_QOS_1_AT_LEAST_ONCE,
 		.topic = {
 			.type = AWS_IOT_SHADOW_TOPIC_NONE,
 			.str  = topic,
@@ -198,12 +207,21 @@ static int publish_one_heartbeat(void)
 		.len = payload_len,
 	};
 
+	k_sem_reset(&s_puback);
 	err = aws_iot_send(&tx);
 	if (err) {
 		LOG_ERR("aws_iot_send: %d", err);
 		return err;
 	}
-	LOG_INF("aws_iot_send returned 0 (QoS 0 — no PUBACK to wait for)");
+	LOG_INF("aws_iot_send queued; waiting for PUBACK (up to %d s)",
+		(int)k_ticks_to_ms_floor32(PUBACK_WAIT.ticks) / 1000);
+
+	err = k_sem_take(&s_puback, PUBACK_WAIT);
+	if (err) {
+		LOG_ERR("PUBACK not received within timeout — broker did not ack");
+		return -ETIMEDOUT;
+	}
+	LOG_INF("PUBACK received — broker confirmed");
 	return 0;
 }
 
@@ -237,9 +255,9 @@ static void publisher_thread_fn(void *p1, void *p2, void *p3)
 
 	(void)publish_one_heartbeat();
 	/* Continue to disconnect even on publish failure — leaves the modem in
-	 * a clean state for the next attach attempt. */
-
-	k_sleep(POST_PUB_DRAIN);
+	 * a clean state for the next attach attempt. With QoS 1 the publish
+	 * helper either confirmed PUBACK or returned -ETIMEDOUT; either way
+	 * we proceed to disconnect (no fixed-delay drain needed). */
 
 	LOG_INF("aws_iot_disconnect");
 	err = aws_iot_disconnect();
