@@ -32,6 +32,10 @@
 #include "cellular.h"
 #include "cloud.h"
 
+#if defined(CONFIG_NRF_FUEL_GAUGE)
+#include "battery.h"
+#endif
+
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
 #define HEARTBEAT_PERIOD_MS  1000
@@ -947,6 +951,16 @@ int main(void)
 			LOG_WRN("dump channel failed to start — file pull disabled");
 		}
 	}
+
+	/* M10.7.2: bring up nPM1300 fuel gauge so cloud heartbeat can publish
+	 * real battery_pct/battery_mv instead of the M12.1c.1 placeholder.
+	 * Non-fatal: getter falls back to placeholder values if init fails or
+	 * the worker hasn't produced its first reading yet. */
+#if defined(CONFIG_NRF_FUEL_GAUGE)
+	if (gosteady_battery_init() < 0) {
+		LOG_WRN("battery init failed — heartbeat will publish placeholder");
+	}
+#endif
 
 	/* M12.1a: kick off async LTE-M attach. Non-blocking — registration
 	 * completes asynchronously; cellular.c logs state changes + signal

@@ -35,6 +35,10 @@
 #include "cellular.h"
 #include "cloud.h"
 
+#if defined(CONFIG_NRF_FUEL_GAUGE)
+#include "battery.h"
+#endif
+
 LOG_MODULE_REGISTER(gs_cloud, LOG_LEVEL_INF);
 
 #define HEARTBEAT_TOPIC_FMT   "gs/%s/heartbeat"
@@ -256,19 +260,50 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 		return err;
 	}
 
+	/* Battery readings: M10.7.2 fuel gauge if compiled in, else the
+	 * placeholder from M12.1c.1. The getter returns 0/0.5 placeholder
+	 * + -EAGAIN if the fuel-gauge worker hasn't produced its first
+	 * reading yet, so we publish whatever it gives us — cloud schema
+	 * is happy with 0.5 since the placeholder is mid-range. */
+	uint16_t battery_mv  = 0;
+	float    battery_pct = 0.5f;
+#if defined(CONFIG_NRF_FUEL_GAUGE)
+	int berr = gosteady_battery_get(&battery_mv, &battery_pct);
+	if (berr == -EAGAIN) {
+		LOG_WRN("battery cache not warm yet — using placeholder 0.5");
+	} else if (berr) {
+		LOG_WRN("battery_get: %d — using placeholder 0.5", berr);
+	}
+#endif
+
 	int n = snprintf(buf, buflen,
 		"{\"serial\":\"%s\","
 		 "\"ts\":\"%s\","
-		 "\"battery_pct\":0.5,"
+		 "\"battery_pct\":%.3f,"
 		 "\"rsrp_dbm\":%d,"
-		 "\"snr_db\":%d}",
-		client_id(), ts, (int)rsrp_dbm, (int)snr_db);
-
+		 "\"snr_db\":%d",
+		client_id(), ts, (double)battery_pct, (int)rsrp_dbm, (int)snr_db);
 	if (n < 0 || (size_t)n >= buflen) {
-		LOG_ERR("heartbeat payload truncated: n=%d buflen=%u",
+		LOG_ERR("heartbeat payload truncated (required block): n=%d buflen=%u",
 			n, (unsigned)buflen);
 		return -ENOMEM;
 	}
+
+	/* battery_mv is an optional field per portal contract (heartbeat
+	 * uplink table, prj coordination doc). Include only when we have
+	 * a real reading. The placeholder path leaves battery_mv=0 which
+	 * we omit so the cloud doesn't store a misleading 0 mV. */
+	if (battery_mv > 0) {
+		int m = snprintf(buf + n, buflen - (size_t)n,
+				 ",\"battery_mv\":%u", (unsigned)battery_mv);
+		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
+		n += m;
+	}
+
+	if ((size_t)(n + 1) >= buflen) { return -ENOMEM; }
+	buf[n++] = '}';
+	buf[n] = '\0';
+
 	*out_len = (size_t)n;
 	return 0;
 }

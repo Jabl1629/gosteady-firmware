@@ -16,4 +16,5 @@ target_sources(app PRIVATE
   src/algo/gs_pipeline.c
 )
 target_sources_ifdef(CONFIG_GOSTEADY_CLOUD_ENABLE app PRIVATE src/cloud.c)
+target_sources_ifdef(CONFIG_NRF_FUEL_GAUGE         app PRIVATE src/battery.c)
 target_include_directories(app PRIVATE src)
