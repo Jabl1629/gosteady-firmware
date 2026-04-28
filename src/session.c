@@ -33,6 +33,7 @@
 #include "algo/gs_pipeline.h"
 #include "cellular.h"
 #include "cloud.h"
+#include "version.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -43,12 +44,6 @@
 #include <math.h>
 #include <string.h>
 #include <stdio.h>
-
-/* Single source of truth for firmware version string; mirrored into the
- * session header (FIRMWARE layer) and the M12.1d activity uplink payload
- * so cloud-side queries can correlate the two. Bumped 2026-04-27 from
- * "0.6.0-algo" to "0.7.0-cloud" with the M12.1c cloud bring-up. */
-#define GS_FIRMWARE_VERSION_STR "0.7.0-cloud"
 
 LOG_MODULE_REGISTER(gs_session, LOG_LEVEL_INF);
 

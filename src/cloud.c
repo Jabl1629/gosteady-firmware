@@ -3,11 +3,14 @@
  *
  * Two outbound paths share one aws_iot lib instance via a mutex:
  *
- *   1. M12.1c.1 heartbeat (one-shot at boot). Worker thread waits for
- *      cellular registration + network time + signal stats, builds the
- *      required-fields-only heartbeat, publishes to gs/{client_id}/heartbeat
- *      with placeholder battery_pct=0.5, then exits. Will be promoted to
- *      hourly cadence + all extras + real battery in M12.1c.2.
+ *   1. M12.1c.2 heartbeat (HOURLY). Worker thread waits for cellular
+ *      registration + network time + signal stats on first iteration,
+ *      then loops: build payload, connect+publish+disconnect, sleep one
+ *      heartbeat interval. Payload is the 5-field required block
+ *      (serial / ts / battery_pct / rsrp_dbm / snr_db) plus all locked
+ *      portal-spec optional extras (battery_mv / firmware / uptime_s /
+ *      last_cmd_id / reset_reason / fault_counters / watchdog_hits).
+ *      M12.1c.1 was the one-shot bring-up; this is the production shape.
  *
  *   2. M12.1d activity (one per session close). session.c calls
  *      gosteady_cloud_publish_activity() which copies the activity record
@@ -19,6 +22,13 @@
  * Both publishes use QoS 1 and wait for PUBACK before disconnect — without
  * that, on NB-IoT the modem tears down TCP before the PUBLISH bytes hit
  * the wire (proven empirically during M12.1c.1 closure debug).
+ *
+ * Heartbeat retry policy: on connect/publish failure, sleep with linear
+ * backoff (1 / 5 / 15 min) up to 3 attempts, then give up on this hour's
+ * heartbeat and wait for the next scheduled tick. Bounds the energy cost
+ * of a sustained cellular outage (offline-detection cloud-side will mark
+ * device as offline at 2 hr without heartbeat anyway, so trying harder
+ * than ~21 min into the hour buys us nothing).
  *
  * Verbose event logging on uart0 so first-time TLS / MQTT issues are
  * diagnosable from logs/uart0_*.log alone.
@@ -34,9 +44,14 @@
 
 #include "cellular.h"
 #include "cloud.h"
+#include "version.h"
 
 #if defined(CONFIG_NRF_FUEL_GAUGE)
 #include "battery.h"
+#endif
+
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+#include "forensics.h"
 #endif
 
 LOG_MODULE_REGISTER(gs_cloud, LOG_LEVEL_INF);
@@ -44,8 +59,19 @@ LOG_MODULE_REGISTER(gs_cloud, LOG_LEVEL_INF);
 #define HEARTBEAT_TOPIC_FMT   "gs/%s/heartbeat"
 #define ACTIVITY_TOPIC_FMT    "gs/%s/activity"
 #define TOPIC_MAX             64
-#define HEARTBEAT_PAYLOAD_MAX 256
+/* Production heartbeat payload sized for: 5 required fields + battery_mv +
+ * firmware + uptime_s + last_cmd_id (≤32) + reset_reason (≤64) +
+ * fault_counters object + watchdog_hits + structural overhead. ~360 B max
+ * observed; 512 B leaves comfortable headroom for future schema additions. */
+#define HEARTBEAT_PAYLOAD_MAX 512
 #define ACTIVITY_PAYLOAD_MAX  384
+
+/* M12.1c.2 hourly cadence + linear-backoff retry on the same wake. */
+#define HEARTBEAT_INTERVAL    K_SECONDS(60 * 60)
+#define HEARTBEAT_RETRY_1ST   K_SECONDS(60)
+#define HEARTBEAT_RETRY_2ND   K_SECONDS(60 * 5)
+#define HEARTBEAT_RETRY_3RD   K_SECONDS(60 * 15)
+#define HEARTBEAT_MAX_ATTEMPTS 3
 
 /* Wait windows. aws_iot_connect is documented as "synchronous and only returns
  * success when the client has connected" but in practice the CONNECTED event
@@ -73,6 +99,14 @@ static K_SEM_DEFINE(s_disconnected, 0, 1);
 static K_SEM_DEFINE(s_puback,       0, 1);
 
 static atomic_t s_initialized = ATOMIC_INIT(0);
+
+/* last_cmd_id: most-recent downlink cmd_id received from gs/{serial}/cmd.
+ * Echoed in heartbeat as ack-on-uplink per portal contract. M12.1c.2 ships
+ * the field plumbing; M12.1e.2 will populate it when the activate cmd
+ * arrives. Empty string means "no cmd seen yet" → field omitted from
+ * payload (cloud accepts missing optional). */
+static K_MUTEX_DEFINE(s_last_cmd_lock);
+static char s_last_cmd_id[40] = { 0 };  /* "act_<uuid>" plausibly fits in 40 */
 
 static const char *client_id(void)
 {
@@ -241,7 +275,22 @@ out_unlock:
 	return rc;
 }
 
-/* ---- M12.1c.1 heartbeat path ---- */
+/* ---- M12.1c.2 production heartbeat path ----
+ *
+ * Required-fields block: serial / ts / battery_pct / rsrp_dbm / snr_db.
+ * Optional extras (per portal contract — all "accept-all" cloud-side):
+ *   battery_mv      — only when fuel gauge has produced a reading
+ *   firmware        — semver string from version.h
+ *   uptime_s        — seconds since this boot
+ *   last_cmd_id     — only when activate cmd has been received
+ *   reset_reason    — formatted reset cause from M10.7.3 forensics
+ *   fault_counters  — JSON object from M10.7.3 forensics
+ *   watchdog_hits   — cumulative WDT-triggered resets
+ *
+ * Each optional is independently gated so a missing prereq (forensics
+ * not enabled, fuel gauge not warm, etc.) just omits that field instead
+ * of failing the publish.
+ */
 
 static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 {
@@ -270,9 +319,9 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 #if defined(CONFIG_NRF_FUEL_GAUGE)
 	int berr = gosteady_battery_get(&battery_mv, &battery_pct);
 	if (berr == -EAGAIN) {
-		LOG_WRN("battery cache not warm yet — using placeholder 0.5");
+		LOG_DBG("battery cache not warm yet — placeholder 0.5");
 	} else if (berr) {
-		LOG_WRN("battery_get: %d — using placeholder 0.5", berr);
+		LOG_WRN("battery_get: %d — placeholder 0.5", berr);
 	}
 #endif
 
@@ -284,21 +333,67 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 		 "\"snr_db\":%d",
 		client_id(), ts, (double)battery_pct, (int)rsrp_dbm, (int)snr_db);
 	if (n < 0 || (size_t)n >= buflen) {
-		LOG_ERR("heartbeat payload truncated (required block): n=%d buflen=%u",
+		LOG_ERR("heartbeat truncated (required block): n=%d buflen=%u",
 			n, (unsigned)buflen);
 		return -ENOMEM;
 	}
 
-	/* battery_mv is an optional field per portal contract (heartbeat
-	 * uplink table, prj coordination doc). Include only when we have
-	 * a real reading. The placeholder path leaves battery_mv=0 which
-	 * we omit so the cloud doesn't store a misleading 0 mV. */
+#define APPEND_OR_FAIL(...)                                          \
+	do {                                                          \
+		int m = snprintf(buf + n, buflen - (size_t)n, __VA_ARGS__); \
+		if (m < 0 || (size_t)(n + m) >= buflen) {            \
+			return -ENOMEM;                              \
+		}                                                     \
+		n += m;                                               \
+	} while (0)
+
+	/* battery_mv: only when fuel gauge produced a real reading. */
 	if (battery_mv > 0) {
-		int m = snprintf(buf + n, buflen - (size_t)n,
-				 ",\"battery_mv\":%u", (unsigned)battery_mv);
-		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
-		n += m;
+		APPEND_OR_FAIL(",\"battery_mv\":%u", (unsigned)battery_mv);
 	}
+
+	/* firmware: semver from version.h (single source of truth). Always
+	 * publish — useful for cloud-side correlation regardless of feature gates. */
+	APPEND_OR_FAIL(",\"firmware\":\"%s\"", GS_FIRMWARE_VERSION_STR);
+
+	/* uptime_s: time since boot. Bounded by uint32_t cast (~136 years). */
+	APPEND_OR_FAIL(",\"uptime_s\":%u",
+		       (unsigned)(k_uptime_get() / 1000));
+
+	/* last_cmd_id: snapshot under mutex. Empty → field omitted (no cmd
+	 * received yet — cloud's matching handler treats absence as "device
+	 * has nothing new to ack"). */
+	char cmd_snapshot[sizeof(s_last_cmd_id)];
+	k_mutex_lock(&s_last_cmd_lock, K_FOREVER);
+	strncpy(cmd_snapshot, s_last_cmd_id, sizeof(cmd_snapshot));
+	cmd_snapshot[sizeof(cmd_snapshot) - 1] = '\0';
+	k_mutex_unlock(&s_last_cmd_lock);
+	if (cmd_snapshot[0] != '\0') {
+		APPEND_OR_FAIL(",\"last_cmd_id\":\"%s\"", cmd_snapshot);
+	}
+
+	/* M10.7.3 forensics extras: reset_reason / fault_counters / watchdog_hits. */
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+	char reset_reason[64];
+	if (gosteady_forensics_get_reset_reason(reset_reason,
+						 sizeof(reset_reason)) == 0) {
+		APPEND_OR_FAIL(",\"reset_reason\":\"%s\"", reset_reason);
+	}
+
+	/* fault_counters as a JSON object literal — built by forensics so
+	 * the schema lives next to the field definitions. */
+	char fc_json[64];
+	size_t fc_len = 0;
+	if (gosteady_forensics_fault_counters_json(
+		    fc_json, sizeof(fc_json), &fc_len) == 0) {
+		APPEND_OR_FAIL(",\"fault_counters\":%s", fc_json);
+	}
+
+	APPEND_OR_FAIL(",\"watchdog_hits\":%u",
+		       (unsigned)gosteady_forensics_get_watchdog_hits());
+#endif
+
+#undef APPEND_OR_FAIL
 
 	if ((size_t)(n + 1) >= buflen) { return -ENOMEM; }
 	buf[n++] = '}';
@@ -306,6 +401,64 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 
 	*out_len = (size_t)n;
 	return 0;
+}
+
+/* Linear backoff schedule: 1 / 5 / 15 min. After the third failure the
+ * worker gives up on this hour's heartbeat. */
+static k_timeout_t heartbeat_retry_delay(int attempt)
+{
+	switch (attempt) {
+	case 0: return HEARTBEAT_RETRY_1ST;
+	case 1: return HEARTBEAT_RETRY_2ND;
+	default: return HEARTBEAT_RETRY_3RD;
+	}
+}
+
+/*
+ * Try the heartbeat publish up to HEARTBEAT_MAX_ATTEMPTS times with linear
+ * backoff between attempts. Returns 0 on first success, last-error if all
+ * attempts failed. The mutex inside connect_publish_disconnect serializes
+ * vs the activity worker, so an in-flight activity publish doesn't race
+ * the heartbeat retry.
+ */
+static int heartbeat_publish_with_retry(const char *topic, size_t topic_len)
+{
+	int last_err = 0;
+	for (int attempt = 0; attempt < HEARTBEAT_MAX_ATTEMPTS; attempt++) {
+		char payload[HEARTBEAT_PAYLOAD_MAX];
+		size_t payload_len = 0;
+
+		/* Rebuild the payload on every attempt so ts / battery / RSRP
+		 * are fresh — important after a 15 min wait. */
+		int err = build_heartbeat_payload(payload, sizeof(payload),
+						  &payload_len);
+		if (err) {
+			LOG_ERR("heartbeat payload build failed: %d", err);
+			last_err = err;
+			break;
+		}
+
+		err = connect_publish_disconnect(topic, topic_len,
+						 payload, payload_len);
+		if (err == 0) {
+			if (attempt > 0) {
+				LOG_INF("heartbeat succeeded on retry %d", attempt);
+			}
+			return 0;
+		}
+
+		last_err = err;
+		LOG_WRN("heartbeat attempt %d/%d failed (%d)",
+			attempt + 1, HEARTBEAT_MAX_ATTEMPTS, err);
+
+		if (attempt + 1 < HEARTBEAT_MAX_ATTEMPTS) {
+			k_timeout_t delay = heartbeat_retry_delay(attempt);
+			LOG_INF("heartbeat backoff: sleeping %d s before next attempt",
+				(int)k_ticks_to_ms_floor32(delay.ticks) / 1000);
+			k_sleep(delay);
+		}
+	}
+	return last_err;
 }
 
 static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
@@ -319,27 +472,29 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 		return;
 	}
 
-	/* Heartbeat payload depends on cellular getters (network time + signal
-	 * stats), so wait for cellular ready BEFORE building the payload.
-	 * connect_publish_disconnect will also wait_for_cellular_ready
-	 * internally, but that becomes a no-op once we're already ready.
-	 * (Activity worker doesn't need this pre-wait — its payload is built
-	 * from the cached struct passed in via msgq, no cellular calls.) */
+	/* Wait for cellular ready ONCE on first iteration. After that the
+	 * connect_publish_disconnect path waits internally; no need to
+	 * re-block at the top of every hourly tick. */
 	if (wait_for_cellular_ready() != 0) {
-		LOG_ERR("heartbeat publish skipped — cellular never became ready");
+		LOG_ERR("heartbeat thread giving up — cellular never became ready");
 		return;
 	}
 
-	char payload[HEARTBEAT_PAYLOAD_MAX];
-	size_t payload_len = 0;
-	int err = build_heartbeat_payload(payload, sizeof(payload), &payload_len);
-	if (err) {
-		LOG_ERR("heartbeat publish skipped — payload build failed: %d", err);
-		return;
+	/* Production hourly cadence: publish, sleep one interval, repeat.
+	 * The cloud's offline-detection threshold is 2 hr without a heartbeat,
+	 * so a single missed publish (e.g., after retry exhaustion) doesn't
+	 * trip an alert; two in a row will. */
+	int iter = 0;
+	while (1) {
+		LOG_INF("heartbeat tick #%d (cadence=%d s)", iter++,
+			(int)k_ticks_to_ms_floor32(HEARTBEAT_INTERVAL.ticks) / 1000);
+		int rc = heartbeat_publish_with_retry(topic, (size_t)t);
+		if (rc != 0) {
+			LOG_ERR("heartbeat tick #%d FAILED after %d attempts (%d) — waiting for next interval",
+				iter - 1, HEARTBEAT_MAX_ATTEMPTS, rc);
+		}
+		k_sleep(HEARTBEAT_INTERVAL);
 	}
-
-	(void)connect_publish_disconnect(topic, (size_t)t, payload, payload_len);
-	LOG_INF("M12.1c.1 one-shot heartbeat sequence complete");
 }
 
 /* ---- M12.1d activity path ---- */
@@ -440,6 +595,16 @@ static void activity_worker_thread_fn(void *p1, void *p2, void *p3)
 		(void)connect_publish_disconnect(topic, (size_t)t, payload, payload_len);
 		LOG_INF("M12.1d activity uplink sequence complete");
 	}
+}
+
+void gosteady_cloud_set_last_cmd_id(const char *cmd_id)
+{
+	if (cmd_id == NULL) { cmd_id = ""; }
+	k_mutex_lock(&s_last_cmd_lock, K_FOREVER);
+	strncpy(s_last_cmd_id, cmd_id, sizeof(s_last_cmd_id) - 1);
+	s_last_cmd_id[sizeof(s_last_cmd_id) - 1] = '\0';
+	k_mutex_unlock(&s_last_cmd_lock);
+	LOG_INF("last_cmd_id updated to '%s'", s_last_cmd_id);
 }
 
 int gosteady_cloud_publish_activity(const struct gosteady_activity *a)

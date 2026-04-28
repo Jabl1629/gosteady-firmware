@@ -88,6 +88,20 @@ int gosteady_cloud_init(void);
  */
 int gosteady_cloud_publish_activity(const struct gosteady_activity *a);
 
+/*
+ * Record the most-recently-received downlink cmd_id from gs/{serial}/cmd.
+ * The next heartbeat publishes it as `last_cmd_id` per portal contract;
+ * the cloud's heartbeat handler matches it against any cmd issued in the
+ * last 24 h to confirm device acked the cmd.
+ *
+ * `cmd_id` is copied into internal storage; caller's buffer may be reused.
+ * Pass an empty string to clear (e.g., on de-provision, post-Phase-2A).
+ *
+ * Wired up here in M12.1c.2 as a dormant API; M12.1e.2 populates it on
+ * activate-cmd receipt.
+ */
+void gosteady_cloud_set_last_cmd_id(const char *cmd_id);
+
 #ifdef __cplusplus
 }
 #endif
