@@ -1,0 +1,335 @@
+# GoSteady firmware — static partition manager layout (M10.7.1).
+#
+# Locks the on-device partition layout for deployment. Adds three new
+# partitions on the external flash for the production-telemetry stack:
+#
+#   - crash_forensics  (64 KB)    Reset reason / fault counters / last log
+#                                 lines. Survives reset; surfaced via the
+#                                 next heartbeat (M10.7.3 + M12.1c.2).
+#   - telemetry_queue  (256 KB)   Persistent Priority-1 (heartbeat / activity)
+#                                 queue when modem unavailable. Drained on
+#                                 next cellular wake oldest-first per the
+#                                 M10.5 offline-buffering policy.
+#   - snippet_storage  (16 MB)    Snippet ring (LittleFS-formatted) per the
+#                                 M10.5 snippet upload policy. Capture-pause
+#                                 at 90% full + 14-day stale cutoff are
+#                                 firmware-internal policies; the partition
+#                                 itself is just storage.
+#
+# All three live in the previously-unallocated 19 MB after `littlefs_storage`,
+# starting at 0xcd2000. Remaining ~2.86 MB stays as the catch-all
+# `external_flash` partition for future use (a snippet partition resize, an
+# OTA staging slot, etc.).
+#
+# Internal flash partitions are listed verbatim from a fresh
+# `west build -p always -- -DEXTRA_CONF_FILE=prj_cloud.conf` of the pre-M10.7.1
+# tree (the only canonical truth) so this file is a complete static layout
+# and the partition manager doesn't try to recompute anything. NCS v3.2.4
+# `b0` + MCUboot + TF-M + non-secure-app stack; do NOT change addresses
+# without re-validating against a fresh build's partitions.yml.
+#
+# After dropping this file in, build with `-p always` because the partition
+# manager doesn't pick up YAML changes in incremental builds.
+#
+# Erase block on the GD25LE255E SPI NOR is 4 KB (0x1000); all our new
+# partition addresses are 64 KB-aligned (well above the erase boundary).
+
+# ---- internal flash (flash_primary) ----
+b0:
+  address: 0x0
+  end_address: 0x8000
+  region: flash_primary
+  size: 0x8000
+b0_container:
+  address: 0x0
+  end_address: 0x8000
+  orig_span: &b0_container_span
+  - b0
+  region: flash_primary
+  size: 0x8000
+  span: *b0_container_span
+s0_pad:
+  address: 0x8000
+  end_address: 0x8200
+  region: flash_primary
+  share_size:
+  - mcuboot_pad
+  size: 0x200
+mcuboot:
+  address: 0x8200
+  end_address: 0x1c000
+  region: flash_primary
+  size: 0x13e00
+s0_image:
+  address: 0x8200
+  end_address: 0x1c000
+  orig_span: &s0_image_span
+  - mcuboot
+  region: flash_primary
+  size: 0x13e00
+  span: *s0_image_span
+s0:
+  address: 0x8000
+  end_address: 0x1c000
+  orig_span: &s0_span
+  - mcuboot
+  - s0_pad
+  region: flash_primary
+  size: 0x14000
+  span: *s0_span
+s1_pad:
+  address: 0x1c000
+  end_address: 0x1c200
+  region: flash_primary
+  share_size:
+  - mcuboot_pad
+  size: 0x200
+s1_image:
+  address: 0x1c200
+  end_address: 0x30000
+  region: flash_primary
+  share_size:
+  - mcuboot
+  size: 0x13e00
+s1:
+  address: 0x1c000
+  end_address: 0x30000
+  orig_span: &s1_span
+  - s1_pad
+  - s1_image
+  region: flash_primary
+  size: 0x14000
+  span: *s1_span
+mcuboot_pad:
+  address: 0x30000
+  end_address: 0x30200
+  region: flash_primary
+  size: 0x200
+tfm:
+  address: 0x30200
+  end_address: 0x38000
+  region: flash_primary
+  size: 0x7e00
+tfm_secure:
+  address: 0x30000
+  end_address: 0x38000
+  orig_span: &tfm_secure_span
+  - mcuboot_pad
+  - tfm
+  region: flash_primary
+  size: 0x8000
+  span: *tfm_secure_span
+app:
+  address: 0x38000
+  end_address: 0x100000
+  region: flash_primary
+  size: 0xc8000
+tfm_nonsecure:
+  address: 0x38000
+  end_address: 0x100000
+  orig_span: &tfm_nonsecure_span
+  - app
+  region: flash_primary
+  size: 0xc8000
+  span: *tfm_nonsecure_span
+mcuboot_primary_app:
+  address: 0x30200
+  end_address: 0x100000
+  orig_span: &mcuboot_primary_app_span
+  - tfm
+  - app
+  region: flash_primary
+  size: 0xcfe00
+  span: *mcuboot_primary_app_span
+app_image:
+  address: 0x30200
+  end_address: 0x100000
+  orig_span: &app_image_span
+  - tfm
+  - app
+  region: flash_primary
+  size: 0xcfe00
+  span: *app_image_span
+mcuboot_primary:
+  address: 0x30000
+  end_address: 0x100000
+  orig_span: &mcuboot_primary_span
+  - mcuboot_pad
+  - app
+  - tfm
+  region: flash_primary
+  size: 0xd0000
+  span: *mcuboot_primary_span
+
+# ---- external flash (GD25LE255E, 32 MB) ----
+mcuboot_secondary:
+  address: 0x0
+  end_address: 0xd0000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  share_size:
+  - mcuboot_primary
+  size: 0xd0000
+fmfu_storage:
+  address: 0xd0000
+  end_address: 0x4d0000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  size: 0x400000
+settings_storage:
+  address: 0x4d0000
+  end_address: 0x4d2000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  size: 0x2000
+littlefs_storage:
+  address: 0x4d2000
+  end_address: 0xcd2000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  size: 0x800000
+
+# --- M10.7.1 new partitions ---
+# crash_forensics: 64 KB at 0xcd2000–0xce2000.
+# Single 4 KB region used as a circular layout (bootcount + reset_reason +
+# fault frame + last-log-line ring). Plenty of headroom for future fields.
+crash_forensics:
+  address: 0xcd2000
+  end_address: 0xce2000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  size: 0x10000
+
+# telemetry_queue: 256 KB at 0xce2000–0xd22000.
+# Sized for ~1 month of priority-1 backlog at worst case (24 heartbeats/day
+# × 30 days + ~5 activity rows/day × 30 days × ~256 B per record = ~210 KB).
+telemetry_queue:
+  address: 0xce2000
+  end_address: 0xd22000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  size: 0x40000
+
+# snippet_storage: 16 MB at 0xd22000–0x1d22000. Hosts a separate LittleFS
+# instance so a corrupted snippet FS doesn't affect /lfs/sessions, and a
+# corrupted /lfs/sessions doesn't take the snippet retain corpus with it.
+# Sized per M10.5 plan: 8 snippets/day × ~84 KB max = 672 KB/day; 16 MB
+# holds ~24 days at the cap with no purges (in practice clinic walks are
+# < 30 s so most snippets are smaller; effective capacity is a few months).
+snippet_storage:
+  address: 0xd22000
+  end_address: 0x1d22000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  size: 0x1000000
+
+# Catch-all "free" remainder of the GD25LE255E. Not used by any current
+# code path — reserved for future use (e.g., snippet partition resize,
+# OTA staging once OTA lands post-deployment, additional log regions).
+external_flash:
+  address: 0x1d22000
+  end_address: 0x2000000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+  size: 0x2de000
+
+# ---- OTP region (not changed; fixed by silicon) ----
+otp:
+  address: 0xff8388
+  end_address: 0xff83fc
+  region: otp
+  size: 0x74
+provision:
+  address: 0xff8108
+  end_address: 0xff8388
+  region: otp
+  size: 0x280
+
+# ---- SRAM regions (not changed; managed by NRF modem lib + TF-M) ----
+tfm_sram:
+  address: 0x20000000
+  end_address: 0x20004000
+  inside:
+  - sram_secure
+  placement:
+    after:
+    - start
+  region: sram_primary
+  size: 0x4000
+sram_secure:
+  address: 0x20000000
+  end_address: 0x20004000
+  orig_span: &sram_secure_span
+  - tfm_sram
+  region: sram_primary
+  size: 0x4000
+  span: *sram_secure_span
+nrf_modem_lib_ctrl:
+  address: 0x20004000
+  end_address: 0x200044e8
+  inside:
+  - sram_nonsecure
+  placement:
+    after:
+    - tfm_sram
+    - start
+  region: sram_primary
+  size: 0x4e8
+nrf_modem_lib_tx:
+  address: 0x200044e8
+  end_address: 0x20006568
+  inside:
+  - sram_nonsecure
+  placement:
+    after:
+    - nrf_modem_lib_ctrl
+  region: sram_primary
+  size: 0x2080
+nrf_modem_lib_rx:
+  address: 0x20006568
+  end_address: 0x20008568
+  inside:
+  - sram_nonsecure
+  placement:
+    after:
+    - nrf_modem_lib_tx
+  region: sram_primary
+  size: 0x2000
+nrf_modem_lib_sram:
+  address: 0x20004000
+  end_address: 0x20008568
+  orig_span: &nrf_modem_lib_sram_span
+  - nrf_modem_lib_ctrl
+  - nrf_modem_lib_tx
+  - nrf_modem_lib_rx
+  region: sram_primary
+  size: 0x4568
+  span: *nrf_modem_lib_sram_span
+sram_primary:
+  address: 0x20008568
+  end_address: 0x20040000
+  region: sram_primary
+  size: 0x37a98
+sram_nonsecure:
+  address: 0x20004000
+  end_address: 0x20040000
+  orig_span: &sram_nonsecure_span
+  - sram_primary
+  - nrf_modem_lib_ctrl
+  - nrf_modem_lib_tx
+  - nrf_modem_lib_rx
+  region: sram_primary
+  size: 0x3c000
+  span: *sram_nonsecure_span
+mcuboot_sram:
+  address: 0x20000000
+  end_address: 0x20040000
+  orig_span: &mcuboot_sram_span
+  - nrf_modem_lib_ctrl
+  - tfm_sram
+  - nrf_modem_lib_tx
+  - sram_primary
+  - nrf_modem_lib_rx
+  region: sram_primary
+  size: 0x40000
+  span: *mcuboot_sram_span
