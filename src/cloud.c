@@ -105,11 +105,33 @@ static int wait_for_cellular_ready(void)
 		err = gosteady_cellular_get_network_time(ts, sizeof(ts));
 		if (err == 0) {
 			LOG_INF("network time available: %s", ts);
+			break;
+		}
+		k_sleep(K_SECONDS(1));
+	}
+	if (err != 0) {
+		LOG_ERR("network time still unavailable after 30 s; giving up");
+		return -ETIMEDOUT;
+	}
+
+	/* Signal stats also lag registration — the cellular reporter polls
+	 * AT+CESQ on its own ~60 s schedule and doesn't fire the first poll
+	 * for a few seconds after registration completes. Poll our cached
+	 * accessor until it returns non-EAGAIN, same as the network-time
+	 * wait above. Required because the heartbeat schema lists `rsrp_dbm`
+	 * + `snr_db` as required fields. */
+	int16_t rsrp_dbm = 0;
+	int8_t  snr_db   = 0;
+	for (int i = 0; i < 60; i++) {
+		err = gosteady_cellular_get_signal(&rsrp_dbm, &snr_db);
+		if (err == 0) {
+			LOG_INF("signal available: rsrp=%d dBm snr=%d dB",
+				(int)rsrp_dbm, (int)snr_db);
 			return 0;
 		}
 		k_sleep(K_SECONDS(1));
 	}
-	LOG_ERR("network time still unavailable after 30 s; giving up");
+	LOG_ERR("signal stats still unavailable after 60 s; giving up");
 	return -ETIMEDOUT;
 }
 
