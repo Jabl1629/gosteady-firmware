@@ -35,6 +35,10 @@
 #include "cloud.h"
 #include "version.h"
 
+#if defined(CONFIG_GOSTEADY_FIELD_MODE)
+#include "activation.h"
+#endif
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/entropy.h>
@@ -314,6 +318,25 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 {
 	if (prewalk == NULL) { return -EINVAL; }
 	if (s_active) { return -EALREADY; }
+
+#if defined(CONFIG_GOSTEADY_FIELD_MODE)
+	/* M12.1e.2 pre-activation gate: in deployment mode, refuse session
+	 * capture until the device has received its first cloud-issued
+	 * `activate` cmd (cf. M10.5 spec). Bench builds skip this gate
+	 * entirely so capture.html / SW0 / control.py paths keep working
+	 * for data-collection runs.
+	 *
+	 * Returning -EACCES on attempted start preserves the existing
+	 * caller error-handling shape (log + skip). The auto-start
+	 * coordinator in main.c already handles a non-zero return from
+	 * session_start by suspending BMI270 + returning to idle, so the
+	 * pre-activation device cleanly gives up after motion confirmation
+	 * if the cloud hasn't activated it yet. */
+	if (!gosteady_activation_is_activated()) {
+		LOG_WRN("session_start refused — device in pre-activation state (waiting for cloud activate cmd)");
+		return -EACCES;
+	}
+#endif
 
 	int ret = fs_mkdir(SESSION_DIR);
 	if (ret < 0 && ret != -EEXIST) {

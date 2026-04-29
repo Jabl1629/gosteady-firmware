@@ -45,6 +45,10 @@
 #include "cellular.h"
 #include "cloud.h"
 #include "version.h"
+#include "activation.h"
+
+#include <zephyr/data/json.h>
+#include <zephyr/net/mqtt.h>
 
 #if defined(CONFIG_NRF_FUEL_GAUGE)
 #include "battery.h"
@@ -58,7 +62,15 @@ LOG_MODULE_REGISTER(gs_cloud, LOG_LEVEL_INF);
 
 #define HEARTBEAT_TOPIC_FMT   "gs/%s/heartbeat"
 #define ACTIVITY_TOPIC_FMT    "gs/%s/activity"
+#define CMD_TOPIC_FMT         "gs/%s/cmd"
 #define TOPIC_MAX             64
+
+/* Backing store for the application-topic subscription (gs/{serial}/cmd).
+ * aws_iot_application_topics_set takes a list of mqtt_topics and the lib
+ * holds pointers into the backing memory across the connect cycle. Sized
+ * for one entry; bump if M12.1f adds more app topics. */
+static char s_cmd_topic[TOPIC_MAX];
+static struct mqtt_topic s_app_topics[1];
 /* Production heartbeat payload sized for: 5 required fields + battery_mv +
  * firmware + uptime_s + last_cmd_id (≤32) + reset_reason (≤64) +
  * fault_counters object + watchdog_hits + structural overhead. ~360 B max
@@ -120,6 +132,117 @@ static const char *client_id(void)
 	return CONFIG_AWS_IOT_CLIENT_ID_STATIC;
 }
 
+/* ---- M12.1e.2 activate cmd parser ----
+ *
+ * Schema (locked 2026-04-17 in coord doc):
+ *   {"cmd":"activate","cmd_id":"act_<uuid>","ts":"<ISO8601>","session_id":"..."}
+ *
+ * Zephyr json lib needs a json_obj_descr table. session_id is captured
+ * but currently unused (audit-only on cloud side); kept in the parse
+ * struct so we don't fail-validate on payloads that include it. */
+struct activate_cmd_json {
+	const char *cmd;
+	const char *cmd_id;
+	const char *ts;
+	const char *session_id;
+};
+
+static const struct json_obj_descr activate_cmd_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, cmd,        JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, cmd_id,     JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, ts,         JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, session_id, JSON_TOK_STRING),
+};
+
+/* Best-effort write of state.reported.activated_at as the device-side
+ * ack of an applied activate cmd. Per coord §C.4.4 invariant: cloud-side
+ * device-shadow-handler (Phase 2A) eventually consumes this and flips
+ * Device Registry.activated_at; for v1 we just need to write it
+ * correctly so the round-trip is observable in the Shadow doc. Not
+ * gated on success — the heartbeat last_cmd_id echo is the canonical
+ * ack per coord §C.2 / D14a. */
+static int write_reported_activated_at(const char *iso)
+{
+	char body[160];
+	int n = snprintf(body, sizeof(body),
+		"{\"state\":{\"reported\":{\"activated_at\":\"%s\"}}}", iso);
+	if (n < 0 || (size_t)n >= sizeof(body)) {
+		LOG_ERR("reported.activated_at body truncated");
+		return -ENOMEM;
+	}
+	struct aws_iot_data tx = {
+		.qos = MQTT_QOS_1_AT_LEAST_ONCE,
+		.topic = { .type = AWS_IOT_SHADOW_TOPIC_UPDATE },
+		.ptr = body,
+		.len = (size_t)n,
+	};
+	int rc = aws_iot_send(&tx);
+	if (rc) {
+		LOG_ERR("reported.activated_at send failed: %d", rc);
+		return rc;
+	}
+	LOG_INF("wrote reported.activated_at=%s to Shadow", iso);
+	return 0;
+}
+
+/* Handle an inbound `activate` cmd.
+ *  - Persist via gosteady_activation_apply (idempotent on cmd_id retry).
+ *  - Echo cmd_id in next heartbeat via the M12.1c.2 plumbing.
+ *  - Best-effort ack-write to Shadow.reported.activated_at.
+ *
+ * Per coord §C.4.4 ("stray activate cmd handling"): treat any received
+ * activate as authoritative — cloud is canonical issuance authority,
+ * firmware shouldn't second-guess.
+ */
+static void handle_activate_cmd(const struct activate_cmd_json *c)
+{
+	if (!c->cmd_id || !c->ts) {
+		LOG_ERR("activate cmd missing required fields (cmd_id=%p ts=%p) — ignored",
+			c->cmd_id, c->ts);
+		return;
+	}
+	LOG_INF("activate cmd received: cmd_id=%s ts=%s session_id=%s",
+		c->cmd_id, c->ts, c->session_id ? c->session_id : "<none>");
+
+	int ret = gosteady_activation_apply(c->cmd_id, c->ts);
+	if (ret < 0) {
+		LOG_ERR("activation_apply failed (%d) — cmd_id NOT acked", ret);
+		return;
+	}
+	gosteady_cloud_set_last_cmd_id(c->cmd_id);
+	(void)write_reported_activated_at(c->ts);
+}
+
+/* Dispatch an inbound app-specific topic message. We only handle the
+ * `activate` cmd today; future cmds (e.g., remote-stop, snippet-arm)
+ * land here too. */
+static void dispatch_app_message(const struct aws_iot_data *msg)
+{
+	if (!msg || !msg->ptr || msg->len == 0) { return; }
+	LOG_INF("app msg on '%.*s' (len=%u): %.*s",
+		(int)msg->topic.len, msg->topic.str,
+		(unsigned)msg->len,
+		(int)msg->len, msg->ptr);
+
+	struct activate_cmd_json parsed = { 0 };
+	int rc = json_obj_parse((char *)msg->ptr, msg->len,
+				 activate_cmd_descr, ARRAY_SIZE(activate_cmd_descr),
+				 &parsed);
+	if (rc < 0) {
+		LOG_ERR("app msg JSON parse failed: %d", rc);
+		return;
+	}
+	if (!parsed.cmd) {
+		LOG_ERR("app msg has no cmd field — ignored");
+		return;
+	}
+	if (strcmp(parsed.cmd, "activate") == 0) {
+		handle_activate_cmd(&parsed);
+	} else {
+		LOG_WRN("unknown cmd '%s' — ignored (forward-compat)", parsed.cmd);
+	}
+}
+
 static void aws_iot_event_handler(const struct aws_iot_evt *evt)
 {
 	switch (evt->type) {
@@ -139,8 +262,12 @@ static void aws_iot_event_handler(const struct aws_iot_evt *evt)
 		LOG_INF("evt: DATA_RECEIVED len=%u type_received=%d",
 			(unsigned)evt->data.msg.len,
 			(int)evt->data.msg.topic.type_received);
-#if defined(CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK)
 		switch (evt->data.msg.topic.type_received) {
+		case AWS_IOT_SHADOW_TOPIC_APPLICATION_SPECIFIC:
+			/* M12.1e.2: gs/{serial}/cmd — activate / future commands. */
+			dispatch_app_message(&evt->data.msg);
+			break;
+#if defined(CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK)
 		case AWS_IOT_SHADOW_TOPIC_GET_ACCEPTED:
 			LOG_INF("shadow GET ACCEPTED — payload (%u B): %.*s",
 				(unsigned)evt->data.msg.len,
@@ -163,10 +290,10 @@ static void aws_iot_event_handler(const struct aws_iot_evt *evt)
 				(unsigned)evt->data.msg.len,
 				(int)evt->data.msg.len, evt->data.msg.ptr);
 			break;
+#endif
 		default:
 			break;
 		}
-#endif
 		break;
 	case AWS_IOT_EVT_PUBACK:
 		LOG_INF("evt: PUBACK msg_id=%u", (unsigned)evt->data.message_id);
@@ -297,6 +424,20 @@ static int connect_publish_disconnect(const char *topic, size_t topic_len,
 	}
 	LOG_INF("PUBACK received — broker confirmed");
 	rc = 0;
+
+	/* M12.1e.2: linger briefly after PUBACK so any pending application-
+	 * topic messages (e.g., activate cmd queued by cloud while we were
+	 * disconnected) have time to flow in before the disconnect.
+	 *
+	 * Without this, a cloud activate cmd published just-before-our-
+	 * connect lands in our session's MQTT buffer but doesn't get
+	 * processed before aws_iot_disconnect tears down the connection.
+	 * 1.5 s is empirically generous: the broker's per-session queue
+	 * delivery happens within ~hundreds of ms after SUBACK, so by
+	 * PUBACK + 1.5 s any held messages have arrived. dispatch_app_message
+	 * runs synchronously from the event handler, so by the time we
+	 * disconnect the cmd has already been parsed + applied. */
+	k_sleep(K_MSEC(1500));
 
 out_disconnect:
 	LOG_INF("aws_iot_disconnect");
@@ -819,6 +960,38 @@ int gosteady_cloud_init(void)
 		LOG_ERR("aws_iot_init: %d", err);
 		atomic_set(&s_initialized, 0);
 		return err;
+	}
+
+	/* M12.1e.2: register gs/{serial}/cmd as an application-specific
+	 * subscription. The aws_iot lib subscribes to all entries on every
+	 * CONNECT, so each cellular wake (heartbeat / activity) is also a
+	 * cmd-reception window. Cloud-side `device-api` Lambda (Phase 2A)
+	 * publishes activate cmds here; firmware echoes the cmd_id in the
+	 * next heartbeat as ack per coord §C.2. */
+	int t = snprintf(s_cmd_topic, sizeof(s_cmd_topic),
+			 CMD_TOPIC_FMT, client_id());
+	if (t < 0 || (size_t)t >= sizeof(s_cmd_topic)) {
+		LOG_ERR("cmd topic truncated: t=%d", t);
+		atomic_set(&s_initialized, 0);
+		return -ENOMEM;
+	}
+	s_app_topics[0] = (struct mqtt_topic){
+		.topic = {
+			.utf8 = s_cmd_topic,
+			.size = (size_t)t,
+		},
+		.qos = MQTT_QOS_1_AT_LEAST_ONCE,
+	};
+	err = aws_iot_application_topics_set(s_app_topics,
+					     ARRAY_SIZE(s_app_topics));
+	if (err) {
+		LOG_ERR("aws_iot_application_topics_set(%s): %d",
+			s_cmd_topic, err);
+		/* Non-fatal: heartbeat / activity still publish; we just
+		 * won't receive activate cmds. Logged loudly so an operator
+		 * sees the misconfiguration. */
+	} else {
+		LOG_INF("registered app subscription: %s (QoS 1)", s_cmd_topic);
 	}
 
 	(void)k_thread_create(&s_heartbeat_thread, s_heartbeat_stack,

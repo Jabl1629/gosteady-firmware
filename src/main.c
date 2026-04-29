@@ -40,6 +40,10 @@
 #include "forensics.h"
 #endif
 
+#if defined(CONFIG_GOSTEADY_CLOUD_ENABLE)
+#include "activation.h"
+#endif
+
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
 #define HEARTBEAT_PERIOD_MS  1000
@@ -938,6 +942,28 @@ int main(void)
 	if (mount_lfs_and_bump_boot_count() < 0) {
 		LOG_WRN("LittleFS bring-up failed — session logging disabled");
 	}
+
+	/* M12.1e.2: load persisted activation state. Must run AFTER /lfs
+	 * is mounted (record lives at /lfs/activation.bin) and BEFORE the
+	 * sampler / auto-start threads spawn (so the pre-activation gate
+	 * in gosteady_session_start has the correct state on the first
+	 * possible session-start attempt). Non-fatal if it fails — the
+	 * default state is "not activated" which is the correct fail-safe. */
+#if defined(CONFIG_GOSTEADY_CLOUD_ENABLE)
+	if (gosteady_activation_init() < 0) {
+		LOG_WRN("activation init failed — defaulting to pre-activation state");
+	}
+	/* Mirror the persisted cmd_id into cloud's heartbeat extras so the
+	 * first heartbeat after a reboot still echoes the ack per portal
+	 * §C.2 (cloud's 24 h matching window keeps the echo meaningful for
+	 * a full day after the activate cmd was issued). */
+	{
+		char cmd_id[40];
+		if (gosteady_activation_get_last_cmd_id(cmd_id, sizeof(cmd_id)) == 0) {
+			gosteady_cloud_set_last_cmd_id(cmd_id);
+		}
+	}
+#endif
 
 	/* Start the 100 Hz sampler after all config is done. */
 	k_thread_create(&sampler_thread, sampler_stack, K_THREAD_STACK_SIZEOF(sampler_stack),
