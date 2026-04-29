@@ -65,6 +65,29 @@ config GOSTEADY_CLOUD_ENABLE
 	  same block factored out for bench cloud-testing without
 	  pulling in FIELD_MODE.
 
+config GOSTEADY_CLOUD_SHADOW_BENCH_CHECK
+	bool "M12.1e.1 Shadow GET + UPDATE round-trip bench check"
+	depends on GOSTEADY_CLOUD_ENABLE
+	default n
+	help
+	  When enabled, src/cloud.c spawns a one-shot worker that fires
+	  ~30 s after boot, takes the aws_iot mutex, and runs an explicit
+	  Shadow GET followed by a Shadow UPDATE against the bench Thing's
+	  shadow document. Outcome is logged loudly to uart0:
+
+	    "M12.1e.1 SHADOW BENCH CHECK: PASS"  → M12.1e.2 can use Shadow.
+	    "M12.1e.1 SHADOW BENCH CHECK: FAIL"  → fall back to MQTT-retained
+	                                            activate cmd per §C.4.4.
+
+	  Closes the open coord-doc question §C.5.1 ("does the NCS 3.2.4
+	  aws_iot lib's Shadow surface work end-to-end on this build?").
+
+	  Bench-only — keep off for shipping deployment builds. The Shadow
+	  topic SUBSCRIBE Kconfigs (CONFIG_AWS_IOT_TOPIC_GET_ACCEPTED_SUBSCRIBE
+	  etc.) need to be y when this is y, plus the per-thing IoT policy
+	  must permit shadow MQTT topics — both granted by the cloud team
+	  in coord §C6.1 (2026-04-28).
+
 config GOSTEADY_FORENSICS_STRESS
 	bool "Compile in CRASH / STALL stress-test commands"
 	depends on GOSTEADY_FORENSICS_ENABLE

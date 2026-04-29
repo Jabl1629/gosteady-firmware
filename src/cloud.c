@@ -98,6 +98,13 @@ static K_SEM_DEFINE(s_connected,    0, 1);
 static K_SEM_DEFINE(s_disconnected, 0, 1);
 static K_SEM_DEFINE(s_puback,       0, 1);
 
+#if defined(CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK)
+/* M12.1e.1 bench-check sems. Given on the corresponding shadow event
+ * type. Used by the bench thread to gate get → update sequencing. */
+static K_SEM_DEFINE(s_shadow_get_accepted,    0, 1);
+static K_SEM_DEFINE(s_shadow_update_accepted, 0, 1);
+#endif
+
 static atomic_t s_initialized = ATOMIC_INIT(0);
 
 /* last_cmd_id: most-recent downlink cmd_id received from gs/{serial}/cmd.
@@ -129,7 +136,37 @@ static void aws_iot_event_handler(const struct aws_iot_evt *evt)
 		k_sem_give(&s_disconnected);
 		break;
 	case AWS_IOT_EVT_DATA_RECEIVED:
-		LOG_INF("evt: DATA_RECEIVED len=%u", (unsigned)evt->data.msg.len);
+		LOG_INF("evt: DATA_RECEIVED len=%u type_received=%d",
+			(unsigned)evt->data.msg.len,
+			(int)evt->data.msg.topic.type_received);
+#if defined(CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK)
+		switch (evt->data.msg.topic.type_received) {
+		case AWS_IOT_SHADOW_TOPIC_GET_ACCEPTED:
+			LOG_INF("shadow GET ACCEPTED — payload (%u B): %.*s",
+				(unsigned)evt->data.msg.len,
+				(int)evt->data.msg.len, evt->data.msg.ptr);
+			k_sem_give(&s_shadow_get_accepted);
+			break;
+		case AWS_IOT_SHADOW_TOPIC_GET_REJECTED:
+			LOG_ERR("shadow GET REJECTED — payload (%u B): %.*s",
+				(unsigned)evt->data.msg.len,
+				(int)evt->data.msg.len, evt->data.msg.ptr);
+			break;
+		case AWS_IOT_SHADOW_TOPIC_UPDATE_ACCEPTED:
+			LOG_INF("shadow UPDATE ACCEPTED — payload (%u B): %.*s",
+				(unsigned)evt->data.msg.len,
+				(int)evt->data.msg.len, evt->data.msg.ptr);
+			k_sem_give(&s_shadow_update_accepted);
+			break;
+		case AWS_IOT_SHADOW_TOPIC_UPDATE_REJECTED:
+			LOG_ERR("shadow UPDATE REJECTED — payload (%u B): %.*s",
+				(unsigned)evt->data.msg.len,
+				(int)evt->data.msg.len, evt->data.msg.ptr);
+			break;
+		default:
+			break;
+		}
+#endif
 		break;
 	case AWS_IOT_EVT_PUBACK:
 		LOG_INF("evt: PUBACK msg_id=%u", (unsigned)evt->data.message_id);
@@ -626,6 +663,140 @@ int gosteady_cloud_publish_activity(const struct gosteady_activity *a)
 	return 0;
 }
 
+/* ---- M12.1e.1 Shadow bench check ----
+ *
+ * One-shot Shadow GET + UPDATE round-trip against the bench Thing's
+ * shadow document. Validates that NCS 3.2.4's aws_iot lib supports the
+ * Shadow surface end-to-end on this firmware build, before M12.1e.2
+ * commits to a Shadow-based pre-activation re-check (vs the MQTT-retained
+ * `activate` cmd fallback per coord doc §C.4.4 / §C.5.1).
+ *
+ * Sequence (gated on CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK; default n):
+ *   1. Wait for cellular ready.
+ *   2. Take s_aws_mutex (serialize against heartbeat/activity workers).
+ *   3. Connect to AWS IoT, wait for CONNECTED.
+ *   4. Publish empty body to AWS_IOT_SHADOW_TOPIC_GET, wait up to 30 s
+ *      for the corresponding GET_ACCEPTED event.
+ *   5. Publish a small `{state:{reported:{shadow_bench_check_at:<ts>}}}`
+ *      body to AWS_IOT_SHADOW_TOPIC_UPDATE, wait for UPDATE_ACCEPTED.
+ *   6. Disconnect, log overall outcome, exit thread.
+ *
+ * Outcome of this run determines M12.1e.2's design path. Logged loudly
+ * on uart0 so it shows up in logs/uart0_*.log and can be quoted into the
+ * coord doc closure entry.
+ */
+#if defined(CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK)
+
+#define SHADOW_OP_TIMEOUT  K_SECONDS(30)
+#define SHADOW_PAYLOAD_MAX 256
+
+static int shadow_send_locked(enum aws_iot_shadow_topic_type topic,
+			       const char *body, size_t body_len)
+{
+	struct aws_iot_data tx = {
+		.qos = MQTT_QOS_1_AT_LEAST_ONCE,
+		.topic = { .type = topic },
+		.ptr = (char *)body,
+		.len = body_len,
+	};
+	return aws_iot_send(&tx);
+}
+
+static int run_shadow_bench_check(void)
+{
+	int rc;
+
+	k_mutex_lock(&s_aws_mutex, K_FOREVER);
+
+	if (wait_for_cellular_ready() != 0) {
+		LOG_ERR("shadow bench: cellular never became ready");
+		rc = -ETIMEDOUT;
+		goto out_unlock;
+	}
+
+	LOG_INF("shadow bench: aws_iot_connect");
+	k_sem_reset(&s_connected);
+	k_sem_reset(&s_disconnected);
+	k_sem_reset(&s_shadow_get_accepted);
+	k_sem_reset(&s_shadow_update_accepted);
+
+	rc = aws_iot_connect(NULL);
+	if (rc) { LOG_ERR("shadow bench: connect: %d", rc); goto out_unlock; }
+	rc = k_sem_take(&s_connected, CONNECT_WAIT);
+	if (rc) { LOG_ERR("shadow bench: CONNECTED timeout"); goto out_disconnect; }
+
+	/* Step 1 — Shadow GET. Empty body publishes to
+	 * $aws/things/<thing>/shadow/get; broker responds on
+	 * .../shadow/get/accepted (we're subscribed via Kconfig). */
+	LOG_INF("shadow bench: sending GET");
+	rc = shadow_send_locked(AWS_IOT_SHADOW_TOPIC_GET, "", 0);
+	if (rc) { LOG_ERR("shadow bench: GET send: %d", rc); goto out_disconnect; }
+
+	rc = k_sem_take(&s_shadow_get_accepted, SHADOW_OP_TIMEOUT);
+	if (rc) {
+		LOG_ERR("shadow bench: GET_ACCEPTED timeout — Shadow GET FAILED");
+		rc = -ETIMEDOUT;
+		goto out_disconnect;
+	}
+	LOG_INF("shadow bench: GET round-trip OK");
+
+	/* Step 2 — Shadow UPDATE. Small reported delta with a timestamp so
+	 * each run leaves a visible mark in the Shadow document. */
+	char ts[32] = "<no-time>";
+	(void)gosteady_cellular_get_network_time(ts, sizeof(ts));
+	char body[SHADOW_PAYLOAD_MAX];
+	int blen = snprintf(body, sizeof(body),
+		"{\"state\":{\"reported\":{\"shadow_bench_check_at\":\"%s\"}}}", ts);
+	if (blen < 0 || (size_t)blen >= sizeof(body)) {
+		LOG_ERR("shadow bench: UPDATE body truncated");
+		rc = -ENOMEM; goto out_disconnect;
+	}
+	LOG_INF("shadow bench: sending UPDATE — %s", body);
+	rc = shadow_send_locked(AWS_IOT_SHADOW_TOPIC_UPDATE, body, (size_t)blen);
+	if (rc) { LOG_ERR("shadow bench: UPDATE send: %d", rc); goto out_disconnect; }
+
+	rc = k_sem_take(&s_shadow_update_accepted, SHADOW_OP_TIMEOUT);
+	if (rc) {
+		LOG_ERR("shadow bench: UPDATE_ACCEPTED timeout — Shadow UPDATE FAILED");
+		rc = -ETIMEDOUT;
+		goto out_disconnect;
+	}
+	LOG_INF("shadow bench: UPDATE round-trip OK");
+	rc = 0;
+
+out_disconnect:
+	(void)aws_iot_disconnect();
+	(void)k_sem_take(&s_disconnected, DISCONNECT_WAIT);
+out_unlock:
+	k_mutex_unlock(&s_aws_mutex);
+	return rc;
+}
+
+static void shadow_bench_thread_fn(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+
+	/* Let the heartbeat thread complete its first publish first — keeps
+	 * boot logs sequential (heartbeat → bench check) for cleaner reading. */
+	k_sleep(K_SECONDS(30));
+
+	int rc = run_shadow_bench_check();
+	if (rc == 0) {
+		LOG_INF("==== M12.1e.1 SHADOW BENCH CHECK: PASS ====");
+		LOG_INF("Shadow GET + UPDATE round-trip work in NCS 3.2.4 against this build.");
+		LOG_INF("M12.1e.2 can use the Shadow path per coord doc §C.4.4.");
+	} else {
+		LOG_ERR("==== M12.1e.1 SHADOW BENCH CHECK: FAIL (%d) ====", rc);
+		LOG_ERR("M12.1e.2 should fall back to MQTT-retained activate cmd.");
+	}
+}
+
+#define SHADOW_BENCH_STACK_SIZE 4096
+K_THREAD_STACK_DEFINE(s_shadow_bench_stack, SHADOW_BENCH_STACK_SIZE);
+static struct k_thread s_shadow_bench_thread;
+
+#endif /* CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK */
+
 /* ---- Init ---- */
 
 #define HEARTBEAT_STACK_SIZE 4096
@@ -662,6 +833,15 @@ int gosteady_cloud_init(void)
 			      WORKER_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&s_activity_thread, "gs_cloud_act");
 
+#if defined(CONFIG_GOSTEADY_CLOUD_SHADOW_BENCH_CHECK)
+	(void)k_thread_create(&s_shadow_bench_thread, s_shadow_bench_stack,
+			      SHADOW_BENCH_STACK_SIZE,
+			      shadow_bench_thread_fn, NULL, NULL, NULL,
+			      WORKER_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&s_shadow_bench_thread, "gs_shadow_bench");
+	LOG_INF("cloud_init OK; heartbeat + activity + shadow-bench workers spawned");
+#else
 	LOG_INF("cloud_init OK; heartbeat + activity workers spawned");
+#endif
 	return 0;
 }
