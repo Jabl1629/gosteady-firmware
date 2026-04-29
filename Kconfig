@@ -65,6 +65,37 @@ config GOSTEADY_CLOUD_ENABLE
 	  same block factored out for bench cloud-testing without
 	  pulling in FIELD_MODE.
 
+config GOSTEADY_SNIPPET_ENABLE
+	bool "M12.1f snippet capture + opportunistic upload"
+	depends on GOSTEADY_CLOUD_ENABLE
+	default n
+	help
+	  When enabled, src/snippet.{h,c} is compiled and the firmware:
+
+	    - Captures the first 30 s of raw 100 Hz BMI270 samples per
+	      session into a snippet_storage LittleFS instance (separate
+	      from /lfs/sessions). On-device layout per snippet:
+	        /snippets/<uuid>.bin   16 B header + N × 28 B records
+	        /snippets/<uuid>.json  metadata sidecar (snippet_id,
+	                               window_start_ts)
+	        /snippets/<uuid>.up    zero-byte uploaded marker
+
+	    - Drains ONE oldest pending snippet per heartbeat cellular
+	      wake via the existing aws_iot connection (after PUBACK,
+	      before disconnect). Outer wire framing per coord §F.3:
+	        [4-byte BE uint32 hdr_len][JSON header][16-byte
+	         binary header][N × 28-byte sample records]
+
+	  Per the M10.5 snippet upload policy this is Priority-2: a
+	  snippet only uploads opportunistically when a heartbeat wake
+	  is already happening; never opens its own cellular cycle.
+
+	  Bench-only for v1; will mature as M14.5 site-survey data
+	  comes in. v1 deferrals (per §F8): scheduled (every 6 hr)
+	  trigger, anomaly trigger, 8 snippets/day cap, battery_pct
+	  ≥ 30 % gate, 14-day stale cutoff. v1 captures every session,
+	  drains FIFO, retains forever once uploaded.
+
 config GOSTEADY_CLOUD_SHADOW_BENCH_CHECK
 	bool "M12.1e.1 Shadow GET + UPDATE round-trip bench check"
 	depends on GOSTEADY_CLOUD_ENABLE

@@ -58,11 +58,16 @@
 #include "forensics.h"
 #endif
 
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+#include "snippet.h"
+#endif
+
 LOG_MODULE_REGISTER(gs_cloud, LOG_LEVEL_INF);
 
 #define HEARTBEAT_TOPIC_FMT   "gs/%s/heartbeat"
 #define ACTIVITY_TOPIC_FMT    "gs/%s/activity"
 #define CMD_TOPIC_FMT         "gs/%s/cmd"
+#define SNIPPET_TOPIC_FMT     "gs/%s/snippet"
 #define TOPIC_MAX             64
 
 /* Backing store for the application-topic subscription (gs/{serial}/cmd).
@@ -131,6 +136,13 @@ static const char *client_id(void)
 {
 	return CONFIG_AWS_IOT_CLIENT_ID_STATIC;
 }
+
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+/* Forward declaration — defined below the JSON-parser block but called
+ * from heartbeat_publish_with_retry which sits above it. Both blocks
+ * share the snippet_publish_callback / drain_one_snippet pair. */
+static int drain_one_snippet(void);
+#endif
 
 /* ---- M12.1e.2 activate cmd parser ----
  *
@@ -425,6 +437,28 @@ static int connect_publish_disconnect(const char *topic, size_t topic_len,
 	LOG_INF("PUBACK received — broker confirmed");
 	rc = 0;
 
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+	/* M12.1f: drain ONE pending snippet per heartbeat wake while the
+	 * connection is still alive. Runs INSIDE the s_aws_mutex critical
+	 * section so we serialize against activity worker + (future)
+	 * cmd-driven publishes. publish_snippet_callback below is the
+	 * actual MQTT send; snippet.c handles file iteration + framing +
+	 * mark-uploaded.
+	 *
+	 * Per M10.5 policy this is a Priority-2 publish (gated to the
+	 * heartbeat wake; never opens its own cellular cycle). v1 skips
+	 * the battery-floor check (battery_pct ≥ 30 %) — relies on the
+	 * fact that if battery were too low for a snippet flush, we'd
+	 * already not have made it through the heartbeat publish. v1.5
+	 * can re-add the explicit gate if field data shows it matters. */
+	int sret = drain_one_snippet();
+	if (sret == -ENOENT) {
+		LOG_DBG("no snippets queued for upload");
+	} else if (sret < 0) {
+		LOG_WRN("snippet drain failed (%d) — will retry next wake", sret);
+	}
+#endif
+
 	/* M12.1e.2: linger briefly after PUBACK so any pending application-
 	 * topic messages (e.g., activate cmd queued by cloud while we were
 	 * disconnected) have time to flow in before the disconnect.
@@ -452,6 +486,54 @@ out_unlock:
 	k_mutex_unlock(&s_aws_mutex);
 	return rc;
 }
+
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+/* M12.1f snippet upload primitive — used as the publish callback that
+ * snippet.c invokes from gosteady_snippet_upload_one. The connection
+ * is already up (we're inside connect_publish_disconnect after a
+ * successful heartbeat publish), so this just pushes the framed
+ * payload to gs/{serial}/snippet at QoS 1 and waits for PUBACK.
+ *
+ * Caller (drain_one_snippet) holds s_aws_mutex. */
+static int publish_snippet_callback(const uint8_t *payload, size_t len)
+{
+	char topic[TOPIC_MAX];
+	int t = snprintf(topic, sizeof(topic), SNIPPET_TOPIC_FMT, client_id());
+	if (t < 0 || (size_t)t >= sizeof(topic)) { return -ENOMEM; }
+
+	struct aws_iot_data tx = {
+		.qos   = MQTT_QOS_1_AT_LEAST_ONCE,
+		.topic = {
+			.type = AWS_IOT_SHADOW_TOPIC_NONE,
+			.str  = topic,
+			.len  = (size_t)t,
+		},
+		.ptr = (char *)payload,
+		.len = len,
+	};
+	k_sem_reset(&s_puback);
+	int rc = aws_iot_send(&tx);
+	if (rc) {
+		LOG_ERR("snippet aws_iot_send: %d", rc);
+		return rc;
+	}
+	rc = k_sem_take(&s_puback, PUBACK_WAIT);
+	if (rc) {
+		LOG_ERR("snippet PUBACK timeout");
+		return -ETIMEDOUT;
+	}
+	LOG_INF("snippet PUBACK received (%u B published)", (unsigned)len);
+	return 0;
+}
+
+/* Drain one pending snippet via snippet.c. Returns whatever
+ * gosteady_snippet_upload_one returns (0 = uploaded, -ENOENT = none
+ * queued, negative = error). */
+static int drain_one_snippet(void)
+{
+	return gosteady_snippet_upload_one(publish_snippet_callback);
+}
+#endif /* CONFIG_GOSTEADY_SNIPPET_ENABLE */
 
 /* ---- M12.1c.2 production heartbeat path ----
  *

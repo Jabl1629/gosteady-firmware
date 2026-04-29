@@ -44,6 +44,10 @@
 #include "activation.h"
 #endif
 
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+#include "snippet.h"
+#endif
+
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
 #define HEARTBEAT_PERIOD_MS  1000
@@ -962,6 +966,15 @@ int main(void)
 		if (gosteady_activation_get_last_cmd_id(cmd_id, sizeof(cmd_id)) == 0) {
 			gosteady_cloud_set_last_cmd_id(cmd_id);
 		}
+	}
+#endif
+
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+	/* M12.1f: mount snippet_storage on its own LittleFS instance.
+	 * Independent from /lfs above — corruption on either side stays
+	 * contained. Failure is non-fatal; capture/upload paths self-skip. */
+	if (gosteady_snippet_init() < 0) {
+		LOG_WRN("snippet init failed — capture + upload disabled");
 	}
 #endif
 

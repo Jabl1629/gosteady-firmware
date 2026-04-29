@@ -39,6 +39,10 @@
 #include "activation.h"
 #endif
 
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+#include "snippet.h"
+#endif
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/entropy.h>
@@ -68,7 +72,12 @@ static K_SEM_DEFINE(stop_done_sem,  0, 1);
 static K_SEM_DEFINE(start_done_sem, 0, 1);
 
 /* Writer thread stack + thread object. */
-K_THREAD_STACK_DEFINE(writer_stack, 3072);
+/* Writer stack bumped 3072 → 4096 with M12.1f. The snippet_capture_append
+ * hook from the per-sample drain loop adds another fs_write call into
+ * the writer thread's stack, and the original 3072 B was tight enough
+ * to fault during session_stop's flush sequence (observed bench
+ * 2026-04-29). +1 KB headroom for the extra LittleFS write path. */
+K_THREAD_STACK_DEFINE(writer_stack, 4096);
 static struct k_thread writer_thread;
 
 /* Session state — only mutated by either the main-thread control path
@@ -275,6 +284,16 @@ static void writer_entry(void *p1, void *p2, void *p3)
 				} else {
 					s_stationary_samples++;
 				}
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+				/* M12.1f: feed the same sample into the snippet
+				 * capture buffer. The snippet module enforces the
+				 * 30 s window itself (-EOVERFLOW once full). Best-
+				 * effort — failure here doesn't affect persistence
+				 * of the canonical session file. */
+				(void)gosteady_snippet_capture_append(
+					s.t_ms, s.ax, s.ay, s.az,
+					s.gx, s.gy, s.gz);
+#endif
 				local_batch[batch_fill++] = s;
 				if (batch_fill == SAMPLE_BATCH_COUNT) {
 					(void)writer_flush(local_batch, &batch_fill);
@@ -301,6 +320,12 @@ static void writer_entry(void *p1, void *p2, void *p3)
 				LOG_ERR("stop close errors: hdr=%d close=%d",
 					hdr_ret, close_ret);
 			}
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+			/* M12.1f: close the snippet capture (rewrites header
+			 * with final sample count, writes JSON sidecar).
+			 * Idempotent if no capture was active. */
+			(void)gosteady_snippet_capture_finish();
+#endif
 			/* Belt-and-suspenders: writer_flush already resets this,
 			 * but an explicit reset here documents the contract that
 			 * local_batch owns no samples across a stop boundary. */
@@ -415,6 +440,21 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 	LOG_INF("session start uuid=%s file=%s start_utc=%s",
 		uuid_str, path,
 		s_session_start_utc_iso[0] ? s_session_start_utc_iso : "(unavailable)");
+
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+	/* M12.1f: arm snippet capture for the first 30 s of this session.
+	 * Reuses the session_uuid as snippet_id so a cloud-side join
+	 * across the snippet S3 object + the activity DDB row is trivial.
+	 * Always-on in v1 — the M10.5 spec also mentions scheduled (every
+	 * 6 hr) and anomaly-triggered modes; deferred to v1.5 polish.
+	 *
+	 * Failure is non-fatal: capture is best-effort, never blocks
+	 * session start. The snippet module enforces the 30 s window
+	 * itself; we just wire append + finish hooks below. */
+	(void)gosteady_snippet_capture_start(uuid_str,
+		s_session_start_utc_iso[0] ? s_session_start_utc_iso : "",
+		(uint64_t)s_session_start_uptime_ms);
+#endif
 	return 0;
 }
 
