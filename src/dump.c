@@ -18,6 +18,10 @@
 #include "dump.h"
 #include "control.h"
 
+#if defined(CONFIG_GOSTEADY_FORENSICS_STRESS)
+#include "forensics.h"
+#endif
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -248,6 +252,14 @@ static void dump_entry(void *p1, void *p2, void *p3)
 			cmd_del(line + 4);
 		} else if (strcmp(line, "PING") == 0) {
 			dump_write("PONG\n", 5);
+#if defined(CONFIG_GOSTEADY_FORENSICS_STRESS)
+		} else if (strcmp(line, "CRASH") == 0) {
+			dump_write("OK crashing\n", 12);
+			gosteady_forensics_stress_fault();
+		} else if (strcmp(line, "STALL") == 0) {
+			dump_write("OK stalling wdt\n", 16);
+			gosteady_forensics_stress_stall_wdt();
+#endif
 		} else if (gosteady_control_recognises(line)) {
 			char resp[96];
 			int n = gosteady_control_execute(line, resp, sizeof(resp));

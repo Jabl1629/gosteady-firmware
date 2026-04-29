@@ -65,6 +65,28 @@ config GOSTEADY_CLOUD_ENABLE
 	  same block factored out for bench cloud-testing without
 	  pulling in FIELD_MODE.
 
+config GOSTEADY_FORENSICS_STRESS
+	bool "Compile in CRASH / STALL stress-test commands"
+	depends on GOSTEADY_FORENSICS_ENABLE
+	default n
+	help
+	  Adds two debug commands to the uart1 dump channel:
+
+	    CRASH    NULL-derefs to trigger a HardFault. Validates that
+	             k_sys_fatal_error_handler captures the ESF, persists
+	             fault_count + last_fault to the crash_forensics
+	             partition, and reboots cleanly.
+
+	    STALL    Sets a flag that causes the WDT supervisor to stop
+	             feeding the watchdog. Hardware watchdog fires ~60 s
+	             later. Validates that hwinfo reports RESET_WATCHDOG
+	             on next boot and that watchdog_hits increments.
+
+	  Bench-only — never enable for a real deployment build. Used to
+	  validate the M10.7.3 crash-forensics path before site-survey ship
+	  (per the M10.5 risk table) and again on each shipping unit during
+	  bring-up. Off by default.
+
 config GOSTEADY_FORENSICS_ENABLE
 	bool "Enable crash forensics + watchdog (M10.7.3)"
 	default n

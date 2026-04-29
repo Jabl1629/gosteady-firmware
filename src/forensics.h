@@ -80,6 +80,29 @@ int gosteady_forensics_fault_counters_json(char *buf, size_t buflen,
  */
 uint32_t gosteady_forensics_get_uptime_s(void);
 
+#if defined(CONFIG_GOSTEADY_FORENSICS_STRESS)
+/*
+ * Deliberate fault for stress-testing the forensics path. Performs a NULL
+ * dereference which triggers a BUSFAULT / MEMFAULT and routes through our
+ * k_sys_fatal_error_handler → flash persist → reboot. Next boot's heartbeat
+ * should report fault_count incremented + last_fault populated.
+ *
+ * Compiled in only when CONFIG_GOSTEADY_FORENSICS_STRESS=y (must be a
+ * deliberate temporary opt-in — stress-test surface should never ship to a
+ * real deployment build).
+ */
+__attribute__((noreturn)) void gosteady_forensics_stress_fault(void);
+
+/*
+ * Deliberate WDT hit for stress-testing. Sets a flag that causes the
+ * supervisor thread to stop feeding the watchdog; ~60 s later the hardware
+ * WDT fires a SoC reset. Next boot's heartbeat should report
+ * reset_reason="WATCHDOG" (joined with whatever else hwinfo reports) and
+ * watchdog_hits incremented.
+ */
+void gosteady_forensics_stress_stall_wdt(void);
+#endif /* CONFIG_GOSTEADY_FORENSICS_STRESS */
+
 #ifdef __cplusplus
 }
 #endif

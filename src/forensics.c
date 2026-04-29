@@ -47,6 +47,7 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/fatal.h>
 #include <zephyr/arch/exception.h>
 
@@ -92,6 +93,37 @@ _Static_assert(sizeof(struct gs_forensics_record) == 256,
 static atomic_t s_initialized = ATOMIC_INIT(0);
 static struct gs_forensics_record s_record;
 static K_MUTEX_DEFINE(s_lock);
+
+/* SRAM noinit retention.
+ *
+ * The fault path (k_sys_fatal_error_handler) can't reliably write to flash:
+ * the SPI flash driver is stateful and after a panic LOG_PANIC mode locks
+ * out the kernel scheduler, so the erase+write sequence either stalls or
+ * is preempted by sys_reboot. Empirically observed on this nRF9151+TF-M
+ * platform (M10.7.3 bench validation 2026-04-29).
+ *
+ * Workaround: the handler stamps the fault info into a noinit RAM region
+ * (which survives sys_reboot's NVIC_SystemReset on Cortex-M), and the
+ * next-boot init path drains it into the on-flash record where flash I/O
+ * is fully ready.
+ *
+ * Magic gate: on a cold power-on, .noinit holds whatever happened to be
+ * in the SRAM cells (typically random or 0xff). The magic word lets us
+ * distinguish "valid pending state from a recent fault" from "random
+ * cold-boot bits." Init clears the magic after consuming the pending state. */
+#define GS_FORENSICS_PENDING_MAGIC  0xF1A56666u  /* "FAILS66" 'ish */
+
+struct __attribute__((aligned(4))) gs_forensics_pending {
+	uint32_t magic;
+	uint32_t fault_inc;
+	uint32_t reason;
+	uint32_t pc;
+	uint32_t lr;
+	uint32_t psr;
+	uint64_t uptime_ms;
+	char     thread_name[32];
+};
+static __attribute__((section(".noinit"))) struct gs_forensics_pending s_pending;
 
 /* ---- Flash R/W helpers ---- */
 
@@ -229,29 +261,42 @@ int gosteady_forensics_fault_counters_json(char *buf, size_t buflen,
  */
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
-	if (atomic_get(&s_initialized) && esf) {
-		s_record.fault_count++;
-		s_record.last_fault.pc        = esf->basic.pc;
-		s_record.last_fault.lr        = esf->basic.lr;
-		s_record.last_fault.psr       = esf->basic.xpsr;
-		s_record.last_fault.reason    = reason;
-		s_record.last_fault.uptime_ms = k_uptime_get();
-
-		const char *tname = k_thread_name_get(k_current_get());
-		memset(s_record.last_fault.thread_name, 0,
-		       sizeof(s_record.last_fault.thread_name));
-		if (tname) {
-			strncpy(s_record.last_fault.thread_name, tname,
-				sizeof(s_record.last_fault.thread_name) - 1);
-		}
-
-		/* Best-effort persist; ignore return code — the system is
-		 * about to reboot regardless. */
-		(void)forensics_write_locked(&s_record);
+	/* Stamp the fault info into noinit RAM. We do NOT touch flash here —
+	 * empirically, post-LOG_PANIC + sys_reboot leaves no usable window
+	 * for flash_area_erase + write to complete. Next-boot init drains
+	 * this region into the on-flash record. */
+	if (s_pending.magic != GS_FORENSICS_PENDING_MAGIC) {
+		/* First fault since init cleared the slot — start fresh. */
+		s_pending.fault_inc = 0;
 	}
-	/* Forward to the default behavior: logs the frame and reboots. */
-	printk("GoSteady forensics: captured fault PC=0x%08x reason=%u\n",
-	       esf ? (unsigned)esf->basic.pc : 0u, reason);
+	s_pending.magic     = GS_FORENSICS_PENDING_MAGIC;
+	s_pending.fault_inc++;
+	s_pending.reason    = reason;
+	s_pending.uptime_ms = k_uptime_get();
+	if (esf) {
+		s_pending.pc  = esf->basic.pc;
+		s_pending.lr  = esf->basic.lr;
+		s_pending.psr = esf->basic.xpsr;
+	} else {
+		s_pending.pc = s_pending.lr = s_pending.psr = 0;
+	}
+
+	const char *tname = k_thread_name_get(k_current_get());
+	memset(s_pending.thread_name, 0, sizeof(s_pending.thread_name));
+	if (tname) {
+		strncpy(s_pending.thread_name, tname,
+			sizeof(s_pending.thread_name) - 1);
+	}
+
+	printk("GoSteady forensics: captured fault PC=0x%08x reason=%u (pending in noinit)\n",
+	       (unsigned)s_pending.pc, reason);
+
+	/* Trigger a SoC reset. sys_reboot() routes through arch's
+	 * NVIC_SystemReset on Cortex-M which produces a clean SOFTWARE reset
+	 * (RESET_SOFTWARE bit in hwinfo on next boot) AND retains SRAM, so
+	 * s_pending survives into next-boot init. Without this we'd hang in
+	 * a halt loop until the WDT fires 60 s later. */
+	sys_reboot(SYS_REBOOT_WARM);
 	k_fatal_halt(reason);
 }
 
@@ -271,16 +316,52 @@ static int s_wdt_channel = -1;
 K_THREAD_STACK_DEFINE(s_wdt_stack, 1024);
 static struct k_thread s_wdt_thread;
 
+#if defined(CONFIG_GOSTEADY_FORENSICS_STRESS)
+static atomic_t s_stress_stall = ATOMIC_INIT(0);
+#endif
+
 static void wdt_supervisor_fn(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
 	while (1) {
+#if defined(CONFIG_GOSTEADY_FORENSICS_STRESS)
+		if (atomic_get(&s_stress_stall)) {
+			/* Stall: skip wdt_feed and drop into a non-yielding
+			 * busy loop so ALL paths to wdt_feed are blocked.
+			 * 60 s later the hardware WDT fires a SoC reset. */
+			LOG_WRN("stress: WDT stall engaged — expecting reset in ~60 s");
+			while (1) { /* busy wait */ }
+		}
+#endif
 		if (s_wdt_channel >= 0) {
 			(void)wdt_feed(s_wdt, s_wdt_channel);
 		}
 		k_msleep(WDT_KICK_MS);
 	}
 }
+
+#if defined(CONFIG_GOSTEADY_FORENSICS_STRESS)
+__attribute__((noreturn)) void gosteady_forensics_stress_fault(void)
+{
+	LOG_WRN("stress: calling k_panic() in 100 ms — expect handler + reboot");
+	k_msleep(100);
+	/* k_panic() routes through Zephyr's arch fault path with reason
+	 * K_ERR_KERNEL_PANIC, which lands in our k_sys_fatal_error_handler
+	 * override. We use this rather than CPU fault hardware (NULL-deref,
+	 * udf, divide-by-zero) because on the Thingy:91 X non-secure split
+	 * with TF-M, all CPU faults are intercepted by the secure side and
+	 * recovered only via watchdog timeout — the non-secure handler we
+	 * own is not invoked. k_panic() bypasses TF-M because it's a software
+	 * panic, not a hardware fault. */
+	k_panic();
+	while (1) { /* unreachable hint */ }
+}
+
+void gosteady_forensics_stress_stall_wdt(void)
+{
+	atomic_set(&s_stress_stall, 1);
+}
+#endif /* CONFIG_GOSTEADY_FORENSICS_STRESS */
 
 static int watchdog_start(void)
 {
@@ -344,6 +425,30 @@ int gosteady_forensics_init(void)
 			s_record.watchdog_hits++;
 			LOG_WRN("previous reset was WATCHDOG — count now %u",
 				(unsigned)s_record.watchdog_hits);
+		}
+		/* Drain noinit pending state from the previous boot's fault
+		 * handler. Magic match means we have valid pending fault info;
+		 * ingest into the persistent record + clear so we don't double-
+		 * count on a subsequent re-init that doesn't trip a fault. */
+		if (s_pending.magic == GS_FORENSICS_PENDING_MAGIC &&
+		    s_pending.fault_inc > 0) {
+			s_record.fault_count += s_pending.fault_inc;
+			s_record.last_fault.pc        = s_pending.pc;
+			s_record.last_fault.lr        = s_pending.lr;
+			s_record.last_fault.psr       = s_pending.psr;
+			s_record.last_fault.reason    = s_pending.reason;
+			s_record.last_fault.uptime_ms = s_pending.uptime_ms;
+			memset(s_record.last_fault.thread_name, 0,
+			       sizeof(s_record.last_fault.thread_name));
+			memcpy(s_record.last_fault.thread_name,
+			       s_pending.thread_name,
+			       sizeof(s_record.last_fault.thread_name));
+			LOG_WRN("drained noinit fault: +%u faults, last PC=0x%08x reason=%u",
+				(unsigned)s_pending.fault_inc,
+				(unsigned)s_pending.pc,
+				(unsigned)s_pending.reason);
+			s_pending.magic = 0;
+			s_pending.fault_inc = 0;
 		}
 	} else {
 		/* Fresh / wiped / corrupted partition: zero and v1-write. */
