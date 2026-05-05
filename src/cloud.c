@@ -852,8 +852,19 @@ static void activity_worker_thread_fn(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		(void)connect_publish_disconnect(topic, (size_t)t, payload, payload_len);
-		LOG_INF("M12.1d activity uplink sequence complete");
+		/* Phase 1.6 follow-up 2026-05-05: do not discard the publish
+		 * return code. Originally `(void)connect_publish_disconnect`,
+		 * which silently swallowed PUBACK timeouts / aws_iot_connect
+		 * failures, leaving "M12.1d activity uplink sequence complete"
+		 * as the only log line regardless of outcome. */
+		int prc = connect_publish_disconnect(topic, (size_t)t,
+						     payload, payload_len);
+		if (prc) {
+			LOG_WRN("activity publish failed: %d (session file still on flash; will not retry)",
+				prc);
+		} else {
+			LOG_INF("M12.1d activity uplink sequence complete");
+		}
 	}
 }
 

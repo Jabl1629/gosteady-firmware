@@ -54,6 +54,19 @@ int gosteady_cellular_get_signal(int16_t *rsrp_dbm, int8_t *snr_db);
  */
 int gosteady_cellular_get_network_time(char *buf, size_t buflen);
 
+/*
+ * Read network UTC time via AT+CCLK? as a Unix-epoch milliseconds value.
+ *
+ * Used by session.c to populate the .dat header's session_start_utc_ms /
+ * session_end_utc_ms fields (the activity-uplink path uses the ISO string
+ * accessor above instead, since cloud schemas expect ISO 8601 strings).
+ *
+ * Returns 0 on success, -EAGAIN if the modem hasn't yet received NITZ,
+ * or -EIO on AT failure. Same caching semantics as the ISO accessor —
+ * each call hits AT+CCLK?, no internal cache.
+ */
+int gosteady_cellular_get_network_time_unix_ms(int64_t *out_ms);
+
 #ifdef __cplusplus
 }
 #endif

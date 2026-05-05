@@ -19,8 +19,11 @@
 
 #include "cellular.h"
 
+#include <time.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/timeutil.h>
 
 #include <modem/lte_lc.h>
 #include <modem/nrf_modem_lib.h>
@@ -312,4 +315,46 @@ int gosteady_cellular_get_network_time(char *buf, size_t buflen)
 		return -EAGAIN;
 	}
 	return read_network_time_iso8601(buf, buflen);
+}
+
+int gosteady_cellular_get_network_time_unix_ms(int64_t *out_ms)
+{
+	if (!out_ms) {
+		return -EINVAL;
+	}
+	if (!s_registered) {
+		return -EAGAIN;
+	}
+
+	int year, month, day, hour, minute, second, tz;
+	int err = nrf_modem_at_scanf("AT+CCLK?",
+		"+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
+		&year, &month, &day, &hour, &minute, &second, &tz);
+	if (err < 0) {
+		return -EIO;
+	}
+	if (err < 7) {
+		/* Modem hasn't received NITZ yet. */
+		return -EAGAIN;
+	}
+
+	/* Convert via Zephyr's UTC-aware timegm helper. struct tm fields:
+	 *   tm_year: years since 1900
+	 *   tm_mon:  0..11
+	 *   tm_mday: 1..31
+	 *   year from AT+CCLK? is 2-digit (00..99) → 2000..2099. */
+	struct tm tm = {
+		.tm_year = (2000 + year) - 1900,
+		.tm_mon  = month - 1,
+		.tm_mday = day,
+		.tm_hour = hour,
+		.tm_min  = minute,
+		.tm_sec  = second,
+	};
+	int64_t epoch_s = timeutil_timegm64(&tm);
+	if (epoch_s == (int64_t)-1) {
+		return -EIO;
+	}
+	*out_ms = epoch_s * 1000;
+	return 0;
 }

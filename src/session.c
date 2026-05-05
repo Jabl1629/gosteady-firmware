@@ -170,7 +170,14 @@ static int writer_flush(struct gosteady_sample *batch, size_t *fill)
 static int rewrite_header(void)
 {
 	s_header.sample_count       = s_sample_count;
-	s_header.session_end_utc_ms = 0;  /* TODO(M12): real UTC once RTC sync lands */
+	/* Phase 1.6 follow-up 2026-05-05: was hardcoded 0 with a stale
+	 * `TODO(M12): real UTC once RTC sync lands` comment, surviving
+	 * past M12.1a's cellular UTC bring-up. Best-effort populate from
+	 * cellular AT+CCLK?; modem-not-ready leaves the field at 0 so
+	 * existing parsers stay happy with the old "0 = unset" sentinel. */
+	int64_t end_ms = 0;
+	int t_err = gosteady_cellular_get_network_time_unix_ms(&end_ms);
+	s_header.session_end_utc_ms = (t_err == 0) ? (uint64_t)end_ms : 0u;
 	s_header.battery_mv_end     = 0;  /* TODO: pending nPM1300 fuel-gauge wiring */
 	s_header.flash_errors       = s_dropped_samples;
 
@@ -232,8 +239,10 @@ static void writer_entry(void *p1, void *p2, void *p3)
 		if (events[2].state == K_POLL_STATE_SIGNALED) {
 			batch_fill = 0;
 			struct gosteady_sample discard;
+			int drained = 0;
 			while (k_msgq_get(&sample_q, &discard, K_NO_WAIT) == 0) {
 				/* drop any residual samples */
+				drained++;
 			}
 			/* Mark the V1 pipeline as needing re-seed on the next
 			 * sample. We don't call gs_pipeline_session_start here
@@ -247,6 +256,12 @@ static void writer_entry(void *p1, void *p2, void *p3)
 			s_stationary_samples = 0;
 			k_poll_signal_reset(&start_signal);
 			events[2].state = K_POLL_STATE_NOT_READY;
+			/* DIAG (Phase 1.6 cloud-coord follow-up 2026-05-05):
+			 * track each writer-thread state transition so the
+			 * "no outputs (pipeline not seeded)" path can be
+			 * root-caused. Drop after diagnosis. */
+			LOG_INF("writer: start handshake — drained=%d, pipeline_seeded reset to false",
+				drained);
 			k_sem_give(&start_done_sem);
 		}
 
@@ -267,6 +282,14 @@ static void writer_entry(void *p1, void *p2, void *p3)
 				if (!s_pipeline_seeded) {
 					gs_pipeline_session_start(&s_pipeline, mag_g);
 					s_pipeline_seeded = true;
+					/* DIAG: confirm seed actually happened on
+					 * the first sample of every session. If this
+					 * line never logs but samples > 0 land, the
+					 * drain loop is being entered with s_active
+					 * already false (writer was starved during
+					 * the active phase). */
+					LOG_INF("writer: pipeline seeded (first mag_g=%.4f)",
+						(double)mag_g);
 				}
 				gs_pipeline_step(&s_pipeline, mag_g);
 				/* Phase 3 auto-stop input: track consecutive
@@ -306,6 +329,13 @@ static void writer_entry(void *p1, void *p2, void *p3)
 		 * header, close. */
 		if (events[1].state == K_POLL_STATE_SIGNALED) {
 			(void)writer_flush(local_batch, &batch_fill);
+			/* DIAG: capture what the writer thread actually sees
+			 * at stop time — pipeline_seeded is the gate that
+			 * decides whether activity uplinks fire (via
+			 * s_pipeline_outputs_valid in session_stop body). */
+			LOG_INF("writer: stop branch — pipeline_seeded=%d, sample_count=%u, batch_fill_at_entry=%u",
+				(int)s_pipeline_seeded, (unsigned)s_sample_count,
+				(unsigned)batch_fill);
 			if (s_pipeline_seeded) {
 				gs_pipeline_finalize(&s_pipeline, &s_pipeline_outputs);
 				s_pipeline_outputs_valid = true;
@@ -396,7 +426,14 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 	s_header.sample_rate_hz        = 100;
 	s_header.accel_range_g         = 4;
 	s_header.gyro_range_dps        = 500;
-	s_header.session_start_utc_ms  = 0;
+	/* Phase 1.6 follow-up: best-effort cellular UTC stamp.
+	 * 0 if cellular not ready (existing "unset" sentinel). */
+	{
+		int64_t start_ms = 0;
+		int t_err = gosteady_cellular_get_network_time_unix_ms(&start_ms);
+		s_header.session_start_utc_ms =
+			(t_err == 0) ? (uint64_t)start_ms : 0u;
+	}
 	s_header.battery_mv_start      = 0;
 	memcpy(&s_header.prewalk, prewalk, sizeof(*prewalk));
 
@@ -624,6 +661,12 @@ static int session_writer_init(void)
 		/* Non-fatal — sessions can still capture, but algo outputs
 		 * will be skipped (s_pipeline_seeded never gets set true
 		 * because gs_pipeline_session_start would fail too). */
+	} else {
+		/* DIAG (Phase 1.6 follow-up): confirm boot-time pipeline
+		 * init succeeded so we can rule it out as the cause of
+		 * "no outputs (pipeline not seeded)" warnings at session
+		 * stop time. */
+		LOG_INF("gs_pipeline_init: ok");
 	}
 	k_thread_create(&writer_thread, writer_stack, K_THREAD_STACK_SIZEOF(writer_stack),
 			writer_entry, NULL, NULL, NULL,
