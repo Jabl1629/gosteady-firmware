@@ -529,12 +529,43 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 	 * processing the stop event. */
 	s_active = false;
 
+	/* Phase 1.6 follow-up 2026-05-05: reset stop_done_sem before raising
+	 * the stop signal. If the previous session's stop timed out at line
+	 * 535 (5s) but the writer's k_sem_give arrived later (after the
+	 * timeout — common when LittleFS GC stalls fs_close on a near-full
+	 * partition), the leftover count=1 sits on the sem. Without this
+	 * reset, the next session's k_sem_take returns instantly without
+	 * waiting for the writer, and reads s_pipeline_outputs_valid before
+	 * the writer has had a chance to set it true → ALGO_V1 WRN
+	 * spuriously fires + activity uplink is silently skipped. Verified
+	 * end-to-end against bench session 203c9073 (44 s real walk, 4352
+	 * samples, no activity uplink to cloud despite captured + finalized
+	 * cleanly on flash). */
+	k_sem_reset(&stop_done_sem);
+
 	/* Signal the writer to finish draining, rewrite the header, and
-	 * close. Wait for the ack — after this returns, the file is safe. */
+	 * close. Wait for the ack — after this returns, the file is safe.
+	 *
+	 * Phase 1.6 follow-up 2026-05-05: bumped 5s → 15s. The writer's
+	 * stop-branch path runs rewrite_header (fs_seek + fs_write +
+	 * fs_sync), fs_close, and snippet_capture_finish (fs_open + fs_write
+	 * sidecar + fs_close) before the k_sem_give at line 365. On a
+	 * near-full LittleFS sessions partition (heavy GC mid-write), each
+	 * fs_sync can stall hundreds of ms; cumulative slowdown observed at
+	 * 5s+ on the bench unit (1.3 MB free / 8 MB partition, 87 .dat
+	 * accumulated). The 5s timeout was firing under normal-but-slow
+	 * conditions — pair this with the k_sem_reset above to make the
+	 * timeout path harmless even when it does fire.
+	 *
+	 * If the timeout fires we still log and fall through; the
+	 * k_sem_reset on the NEXT session_stop guarantees we don't see the
+	 * stale-give bug again. */
 	k_poll_signal_raise(&stop_signal, 0);
-	int ret = k_sem_take(&stop_done_sem, K_SECONDS(5));
+	int ret = k_sem_take(&stop_done_sem, K_SECONDS(15));
 	if (ret < 0) {
-		LOG_ERR("writer stop ack timeout (%d)", ret);
+		LOG_ERR("writer stop ack timeout (%d) — outputs_valid may be stale; "
+			"verify pipeline_seeded in writer's stop-branch log",
+			ret);
 		/* Best-effort cleanup */
 	}
 
