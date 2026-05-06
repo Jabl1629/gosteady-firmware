@@ -65,3 +65,4 @@ logs/
 # the POST-WALK notes sidecar and any per-run log rotations. Bulk
 # binary data — keep out of git entirely.
 raw_sessions/
+log.log
