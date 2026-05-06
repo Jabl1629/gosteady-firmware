@@ -451,8 +451,32 @@ static void sampler_entry(void *p1, void *p2, void *p3)
 				.gz = (float)sensor_value_to_double(&gyro[2]),
 			};
 			int ret = gosteady_session_append(&s);
+			/* Phase 1.6 follow-up 2026-05-05: rate-limit the EAGAIN
+			 * warning on session_append failure. Surfaced 2026-05-05
+			 * against bench unit GS9999999999: when the writer thread
+			 * is starved (ENOSPC, slow GC, etc.), session_append was
+			 * logging at 100 Hz, flooding uart0 + the log subsystem
+			 * to the point that other threads couldn't emit useful
+			 * diagnostic lines. Throttle to one log per 100 consecutive
+			 * failures (≈1 sec at the 100 Hz sampling rate) so the
+			 * warning is still loud enough to spot but doesn't drown
+			 * the rest of the system. The flash-full auto-stop path
+			 * (see heartbeat tick above) is the primary recovery
+			 * signal; this rate-limit is just to prevent log flooding
+			 * during the 1 s window before that auto-stop fires. */
+			static uint32_t s_append_drop_streak;
 			if (ret < 0 && ret != -ENODEV) {
-				LOG_WRN("session_append failed (%d)", ret);
+				s_append_drop_streak++;
+				if (s_append_drop_streak == 1 ||
+				    (s_append_drop_streak % 100) == 0) {
+					LOG_WRN("session_append failed (%d) — drop streak=%u",
+						ret, (unsigned)s_append_drop_streak);
+				}
+			} else {
+				/* Successful enqueue (or session inactive) — reset
+				 * the streak so the next failure logs on its first
+				 * occurrence. */
+				s_append_drop_streak = 0;
 			}
 		}
 
@@ -1077,9 +1101,27 @@ int main(void)
 			 * the threshold — fine for a 15-30 s timeout. */
 			uint32_t stationary_n = gosteady_session_stationary_samples();
 			uint32_t stationary_s = stationary_n / 100;
-			if (stationary_s >= AUTO_STOP_STATIONARY_S) {
-				LOG_INF("auto-stop: %u s of stationary motion → ending session",
-					(unsigned)stationary_s);
+			bool stop_for_stillness = (stationary_s >= AUTO_STOP_STATIONARY_S);
+			/* Phase 1.6 follow-up 2026-05-05: also auto-stop when the
+			 * writer thread has hit ENOSPC. Without this, the writer
+			 * keeps failing every batch flush, the sampler's msgq
+			 * fills, session_append floods EAGAIN at 100 Hz, and the
+			 * device sits in a wedged state until the user does
+			 * something else. Stopping the session lets the activity
+			 * uplink fire (algo outputs are still valid — the pipeline
+			 * runs in-memory regardless of whether writes land), and
+			 * the auto-prune-on-PUBACK path then frees up a .dat slot
+			 * for the next session. Surfaced bug 2026-05-05 against
+			 * bench unit GS9999999999 where this exact failure mode
+			 * crashed the firmware mid-walk. */
+			bool stop_for_flash_full = gosteady_session_flash_full();
+			if (stop_for_stillness || stop_for_flash_full) {
+				if (stop_for_flash_full) {
+					LOG_WRN("auto-stop: sessions partition full (writer hit ENOSPC) → ending session early");
+				} else {
+					LOG_INF("auto-stop: %u s of stationary motion → ending session",
+						(unsigned)stationary_s);
+				}
 				uint32_t count = 0;
 				int ret = gosteady_session_stop(&count);
 				led_set_recording(false);

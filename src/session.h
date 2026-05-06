@@ -217,6 +217,29 @@ uint32_t gosteady_session_stationary_samples(void);
  * active, -EINVAL if `out` is too small. */
 int gosteady_session_get_uuid_str(char *out, size_t out_sz);
 
+/* Phase 1.6 follow-up 2026-05-05: auto-prune-on-publish-success.
+ * Delete the .dat file for `uuid` from the sessions partition. Called
+ * by cloud.c's activity worker after a successful PUBACK on the
+ * matching activity uplink — the .dat file is redundant once the
+ * algo outputs reach cloud (the snippet on the separate snippet
+ * partition is the v1.5 retrain corpus). Bounds growth of the
+ * sessions partition.
+ *
+ * Returns 0 on success, -EINVAL if uuid is malformed, or a negative
+ * fs error if unlink fails. Failure is non-fatal — a leftover .dat
+ * file just delays partition cleanup until the next session.
+ * Caller-supplied uuid must be the canonical 36-char hyphenated form. */
+int gosteady_session_prune(const char *uuid);
+
+/* Phase 1.6 follow-up 2026-05-05: writer thread sets this when the
+ * sessions partition hits ENOSPC (fs_write returns -28). Read by the
+ * main thread's heartbeat tick; on true the main thread calls
+ * gosteady_session_stop() to close the session cleanly so the
+ * existing activity uplink + auto-prune path can run instead of
+ * letting the writer keep retrying failed writes. Cleared at
+ * session_start of the next session. */
+bool gosteady_session_flash_full(void);
+
 #ifdef __cplusplus
 }
 #endif

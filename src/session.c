@@ -104,6 +104,16 @@ static bool               s_pipeline_seeded;
 static struct gs_pipeline_outputs s_pipeline_outputs;
 static bool               s_pipeline_outputs_valid;
 
+/* Phase 1.6 follow-up 2026-05-05: writer thread sets this on ENOSPC
+ * from fs_write. Main thread polls via gosteady_session_flash_full()
+ * and calls session_stop to close the session cleanly so the
+ * activity-uplink + auto-prune-on-publish-success path can fire
+ * before the partition recovers via that prune. Cleared at session
+ * start. Single-writer (writer thread) / single-reader (main thread)
+ * + the value's only-grows-truthy-within-a-session semantics make
+ * unsynchronized access safe. */
+static bool               s_writer_flash_full;
+
 /* Phase 3 auto-stop: count of consecutive non-motion samples seen by the
  * writer thread since the last motion-gate-active sample. Reset to 0 in
  * the start handshake and on any motion-active sample. Reads from the
@@ -158,7 +168,21 @@ static int writer_flush(struct gosteady_sample *batch, size_t *fill)
 	ssize_t want = (ssize_t)(*fill * sizeof(struct gosteady_sample));
 	ssize_t got  = fs_write(&s_file, batch, want);
 	if (got != want) {
-		LOG_ERR("writer fs_write %zd/%zd", got, want);
+		/* Phase 1.6 follow-up 2026-05-05: differentiate ENOSPC from
+		 * other fs_write failures. ENOSPC = sessions partition full;
+		 * we set a flag the main thread polls so it can close the
+		 * session cleanly via gosteady_session_stop(). Other errors
+		 * (corruption, hardware fault, etc.) just get logged. Either
+		 * way we drop the batch and return non-zero so the caller
+		 * stops retrying. We log only the FIRST ENOSPC per session
+		 * — the main thread's auto-stop response is the visibility
+		 * signal, not a 100 Hz log flood. */
+		if (got == -ENOSPC && !s_writer_flash_full) {
+			LOG_ERR("writer fs_write -ENOSPC (partition full) — flagging for clean session_stop");
+			s_writer_flash_full = true;
+		} else if (got != -ENOSPC) {
+			LOG_ERR("writer fs_write %zd/%zd", got, want);
+		}
 		*fill = 0;
 		return got < 0 ? (int)got : -EIO;
 	}
@@ -254,6 +278,15 @@ static void writer_entry(void *p1, void *p2, void *p3)
 			s_pipeline_outputs_valid = false;
 			memset(&s_pipeline_outputs, 0, sizeof(s_pipeline_outputs));
 			s_stationary_samples = 0;
+			/* Phase 1.6 follow-up 2026-05-05: clear flash-full latch
+			 * for the new session. Auto-prune-on-publish for the
+			 * previous session deletes its .dat file before this
+			 * session opens; if that frees space, the new session
+			 * can proceed normally. If partition is still full
+			 * (e.g., snippet partition or LittleFS metadata
+			 * pressure), the writer will re-set the flag on its
+			 * first failed flush. */
+			s_writer_flash_full = false;
 			k_poll_signal_reset(&start_signal);
 			events[2].state = K_POLL_STATE_NOT_READY;
 			/* DIAG (Phase 1.6 cloud-coord follow-up 2026-05-05):
@@ -651,6 +684,13 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 					    : GOSTEADY_ACTIVITY_SURFACE_UNKNOWN;
 		(void)snprintk(a.firmware_version, sizeof(a.firmware_version),
 			       "%s", GS_FIRMWARE_VERSION_STR);
+		/* Phase 1.6 follow-up 2026-05-05: thread the session UUID through
+		 * the activity struct so cloud.c's activity worker can call
+		 * gosteady_session_prune() after PUBACK to delete the .dat file.
+		 * uuid_str is computed at line 605/606 above for the session-stop
+		 * log line — reuse it. */
+		(void)snprintk(a.session_uuid, sizeof(a.session_uuid),
+			       "%s", uuid_str);
 
 		int rc = gosteady_cloud_publish_activity(&a);
 		if (rc) {
@@ -680,6 +720,57 @@ int gosteady_session_get_uuid_str(char *out, size_t out_sz)
 	if (!s_active) { return -ENODEV; }
 	uuid_to_string(s_header.session_uuid, out);
 	return 0;
+}
+
+bool gosteady_session_flash_full(void)
+{
+	return s_writer_flash_full;
+}
+
+int gosteady_session_prune(const char *uuid)
+{
+	if (uuid == NULL) { return -EINVAL; }
+	/* Validate canonical 36-char hyphenated UUID form. Defensive — we
+	 * never want a typo'd path to fs_unlink unrelated files (e.g.,
+	 * /lfs/boot_count). */
+	size_t len = 0;
+	while (len < 37 && uuid[len] != '\0') {
+		len++;
+	}
+	if (len != 36) { return -EINVAL; }
+	for (size_t i = 0; i < 36; i++) {
+		char c = uuid[i];
+		bool ok;
+		if (i == 8 || i == 13 || i == 18 || i == 23) {
+			ok = (c == '-');
+		} else {
+			ok = (c >= '0' && c <= '9') ||
+			     (c >= 'a' && c <= 'f') ||
+			     (c >= 'A' && c <= 'F');
+		}
+		if (!ok) { return -EINVAL; }
+	}
+
+	char path[sizeof(SESSION_DIR) + 1 + 36 + 4 + 1];
+	int n = snprintk(path, sizeof(path), "%s/%s.dat", SESSION_DIR, uuid);
+	if (n < 0 || (size_t)n >= sizeof(path)) {
+		return -EINVAL;
+	}
+
+	int rc = fs_unlink(path);
+	if (rc == 0) {
+		LOG_INF("auto-prune: deleted %s after activity PUBACK", path);
+	} else if (rc == -ENOENT) {
+		/* Already gone — benign. Could happen if the writer never
+		 * managed to create the file (ENOSPC at session_start) or a
+		 * previous prune attempt succeeded but the cloud worker
+		 * retried. */
+		LOG_DBG("auto-prune: %s already absent (rc=-ENOENT)", path);
+		rc = 0;
+	} else {
+		LOG_WRN("auto-prune: fs_unlink %s failed (%d)", path, rc);
+	}
+	return rc;
 }
 
 /* --- One-time writer init, runs at boot via SYS_INIT --- */

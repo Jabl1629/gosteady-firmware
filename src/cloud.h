@@ -58,6 +58,14 @@ struct gosteady_activity {
 	float    roughness_R;                 /* NaN → omit */
 	uint8_t  surface_class;               /* 0xFF → omit */
 	char     firmware_version[16];        /* "" → omit */
+	/* Phase 1.6 follow-up 2026-05-05: session UUID for auto-prune-on-
+	 * publish-success. After PUBACK on the activity uplink, the .dat
+	 * file at /lfs/sessions/{uuid}.dat becomes redundant (algo outputs
+	 * are now in cloud + the snippet on the separate snippet partition
+	 * is the v1.5 retrain corpus). cloud.c calls gosteady_session_prune
+	 * after a successful publish to bound sessions-partition growth.
+	 * Empty string = skip prune. */
+	char     session_uuid[37];            /* "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" + NUL */
 };
 
 /*

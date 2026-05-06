@@ -44,6 +44,7 @@
 
 #include "cellular.h"
 #include "cloud.h"
+#include "session.h"   /* Phase 1.6 follow-up: gosteady_session_prune for auto-prune-on-PUBACK */
 #include "version.h"
 #include "activation.h"
 
@@ -864,6 +865,26 @@ static void activity_worker_thread_fn(void *p1, void *p2, void *p3)
 				prc);
 		} else {
 			LOG_INF("M12.1d activity uplink sequence complete");
+			/* Phase 1.6 follow-up 2026-05-05: auto-prune the .dat
+			 * file after successful PUBACK. The algo outputs are
+			 * now in cloud's Activity Series DDB; the snippet on
+			 * the snippet partition is the v1.5 retrain corpus.
+			 * The .dat file's only remaining role was offline
+			 * re-analysis, which we don't depend on for the v1
+			 * pipeline. Bounded sessions-partition growth =
+			 * prevents the ENOSPC → fatal-fault failure mode
+			 * surfaced 2026-05-05 against bench unit GS9999999999.
+			 *
+			 * Skip if the firmware-side build path didn't
+			 * populate session_uuid (defensive against a future
+			 * caller that bypasses session.c). */
+			if (a.session_uuid[0] != '\0') {
+				int prune_rc = gosteady_session_prune(a.session_uuid);
+				if (prune_rc != 0 && prune_rc != -ENOENT) {
+					LOG_WRN("auto-prune failed for %s: %d",
+						a.session_uuid, prune_rc);
+				}
+			}
 		}
 	}
 }
