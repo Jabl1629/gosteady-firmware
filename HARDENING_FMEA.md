@@ -966,6 +966,67 @@ These items were on the M14.5 punch-list candidate but require external dependen
 
 ---
 
+## Bench-Validation Results — 2026-05-10
+
+The 6 punch-list items above were implemented in firmware commits `2e4c1e7`
++ `5343100` (bumping firmware version `0.8.0-prod` → `0.9.0-hardening`)
+and bench-validated against `GS9999999999` the same day.
+
+| Item | Validation outcome | Evidence |
+|---|---|---|
+| **4.7** boot_count in heartbeat | ✅ PASS | Shadow.reported.boot_count populated (`47` post-flash, then `48` post-reflash). Heartbeat payload `len=309` includes `"boot_count":48`. |
+| **4.1** Forensics reset on activation | ⚠️ NOT TRIGGERED IN BENCH (already-activated unit) | Code path verified compiles + linker resolves `gosteady_forensics_reset_counters`. Will fire on next genuine activation; bench unit's existing `act_test_m12_1e2` is idempotent so reset path doesn't fire. **Validation deferred to first activation of `GS0000000001/2/3`.** |
+| **1.1 + 1.2** Retro-stamp session_start/end | ⚠️ NOT TRIGGERED IN BENCH (cellular up before START) | Code path verified compiles + activity worker contains the retro-stamp dispatch. Bench-test session at 14:24 had cellular UTC available at session_start (`session_start=2026-05-10T20:24:30Z` published cleanly). **Validation will trigger naturally on any cold-boot-with-motion in the field.** |
+| **1.3** Activity republish on PUBACK timeout | ⚠️ NOT TRIGGERED IN BENCH (PUBACK succeeded) | Code path verified compiles + retry loop wired into activity worker. Bench-test PUBACK arrived in <1 s (no failure to retry). **Validation depends on a real cellular flap during a publish window — not reliably injectable on bench.** |
+| **6.2** Boot-time orphan sweep | ✅ PASS | Boot log: `orphan_sweep: deleted 7 stale .dat file(s) at boot` on first reflash, then `1` on subsequent boot (the WDT-recovery boot caught 1 orphan from the failed START). |
+| **6.1** Snippet rotation policy | 🟡 PARTIAL — capture_start hook REVERTED | Boot-time + heartbeat-tick rotation hooks ship and compile/run cleanly. Capture_start hook reverted (commit `5343100`) after WDT regression — see below. Stale-cutoff and free-space rotation still enforced on hourly cadence via heartbeat tick. |
+
+### Item-6.1 Bench-Surfaced Regression (revert in commit `5343100`)
+
+**Symptom:** Two consecutive `tools/control.py start-preset concrete-normal-20`
+attempts both wedged the device past the 60 s WDT timeout. Reset reason on
+recovery boots: `WATCHDOG`. `fault_counters.watchdog` 5→6 in heartbeat.
+Heartbeat tick log went silent for 50 s during each lockup, indicating
+all-thread starvation.
+
+**Root cause:** The `gosteady_snippet_capture_start` rotate hook (added per
+the original FMEA 6.1 spec) called `gosteady_snippet_rotate` BEFORE acquiring
+`s_capture_lock`. `rotate_stale_pass` makes a `cellular_get_network_time_unix_ms`
+AT call. Combined with the two existing AT calls in
+`session.c::gosteady_session_start` (one for `s_header.session_start_utc_ms`,
+one for `s_session_start_utc_iso`), the session-open path now made 3
+sequential AT calls. Today's bench cellular state was unusual — RSRP -97
+to -101 dBm, EMM cause 15 logged, slow registration (3 minutes for one boot
+to register vs typical 7-10 seconds). Under that contention, the AT calls
+serialized inside the `nrf_modem_at` subsystem and cumulative latency
+breached the 60 s WDT envelope.
+
+**Fix:** Drop the rotate-from-capture_start hook. Boot-time + hourly
+heartbeat-tick rotation hooks still ship — coverage of the policy is
+adequate (1-hour cadence vs every-session-start). v1 capture rates
+(~8 sessions/day max) are far below what would fill the 16 MB partition
+between heartbeat ticks.
+
+**Verification post-revert:** Same bench-test sequence (`STATUS` → `START`
+→ wait → `STOP`) completed cleanly. UUID returned in ~330 ms, session ran
+12.42 s, ALGO_V1 ran, activity published with `firmware_version=0.9.0-hardening`,
+PUBACK received in <1 s, auto-prune deleted the .dat. Cloud
+activity-processor logged `activity_ok` with no rejection.
+
+### Adjacent observation — pre-existing AT contention risk
+
+The 2 pre-existing cellular AT calls in `session_start` STILL risk a similar
+WDT lockup under sustained cellular contention. Today's bench cellular state
+was unusual; under typical conditions those calls complete in <100 ms total.
+**M14.5 site-survey should monitor for any session_start that takes >5 s as
+an early-warning signal of AT serialization.** If observed, a follow-up
+patch should add explicit AT timeouts via `nrf_modem_at_cmd_async` or move
+the AT-getting outside the session-open critical path. Captured here as an
+M14.5 watch item; not in the immediate punch-list since it pre-existed and
+hadn't manifested before today.
+
+---
+
 ## Notes on Methodology
 
 - Rows enumerated by walking each module from session.c → cloud.c → cellular.c → snippet.c → forensics.c → activation.c → battery.c, asking "what fails silently?" + "what wears over time?"
