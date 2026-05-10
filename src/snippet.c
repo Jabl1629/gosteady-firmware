@@ -424,13 +424,19 @@ int gosteady_snippet_capture_start(const char *session_uuid_str,
 		return -EINVAL;
 	}
 
-	/* FMEA 6.1 (2026-05-10): pre-capture rotation pass. Bound the
-	 * capture-skip cascade — if the partition is at threshold, evict
-	 * one .up-marked snippet now so we have room. Run BEFORE acquiring
-	 * s_capture_lock to avoid a self-deadlock on snapshot_active_uuid. */
-	(void)gosteady_snippet_rotate(GOSTEADY_SNIPPET_STALE_AGE_S,
-				       GOSTEADY_SNIPPET_ROTATE_THRESHOLD);
-
+	/* FMEA 6.1 (2026-05-10): the original spec called for a rotate
+	 * pass at the top of capture_start, but bench-validation 2026-05-10
+	 * showed the AT call inside rotate_stale_pass (cellular UTC fetch)
+	 * adds a 3rd concurrent AT to the session-start path (alongside the
+	 * two existing AT calls in session.c). Under weak-signal /
+	 * registration-rejection conditions, that contention pushed total
+	 * session_start latency past the 60 s WDT timeout → device reset.
+	 * Reverted to keep rotation at boot (snippet_init) + hourly
+	 * (heartbeat tick) only. Coverage is adequate: hourly stale-cutoff
+	 * + opportunistic free-space rotation handles the gradient case.
+	 * The "rotate immediately before capture" guarantee is lost, but
+	 * v1 capture rates (~8/day max) are well below what would fill
+	 * the partition between heartbeat ticks. */
 	k_mutex_lock(&s_capture_lock, K_FOREVER);
 
 	if (s_cap.active) {
