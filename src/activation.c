@@ -27,6 +27,10 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
 
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+#include "forensics.h"
+#endif
+
 LOG_MODULE_REGISTER(gs_activation, LOG_LEVEL_INF);
 
 #define ACTIVATION_PATH       "/lfs/activation.bin"
@@ -135,6 +139,11 @@ int gosteady_activation_apply(const char *cmd_id, const char *activated_at_iso)
 {
 	if (!cmd_id || !activated_at_iso) { return -EINVAL; }
 
+	/* Capture pre-call state for FMEA 4.1 forensics-counter-reset hook
+	 * below. Reading atomic outside the mutex is fine — the relevant
+	 * transition is "was it activated before this call started". */
+	bool was_activated_before = atomic_get(&s_activated) != 0;
+
 	k_mutex_lock(&s_lock, K_FOREVER);
 
 	/* Idempotent: if the cmd_id matches the persisted one and we're
@@ -164,6 +173,24 @@ int gosteady_activation_apply(const char *cmd_id, const char *activated_at_iso)
 	atomic_set(&s_activated, 1);
 	LOG_INF("activation applied: at=%s cmd_id=%s (persisted to %s)",
 		activated_at_iso, cmd_id, ACTIVATION_PATH);
+
+	/* FMEA 4.1 (2026-05-10): on the transition from not-activated to
+	 * activated, reset cumulative fault counters so a shipping unit
+	 * doesn't carry M14.5 stress-test counters into deployment. The
+	 * idempotent-retry path above returns earlier, so reaching this
+	 * point with was_activated_before == false guarantees a fresh
+	 * apply. boot_count + reset_reason are NOT reset (lifetime device
+	 * state, not deployment lifecycle). */
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+	if (!was_activated_before) {
+		int rrc = gosteady_forensics_reset_counters();
+		if (rrc < 0) {
+			LOG_WRN("forensics counter reset on first activation failed (%d) — continuing",
+				rrc);
+		}
+	}
+#endif
+
 	return 0;
 }
 

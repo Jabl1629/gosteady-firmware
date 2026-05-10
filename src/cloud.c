@@ -107,6 +107,21 @@ static struct mqtt_topic s_app_topics[1];
 K_MSGQ_DEFINE(s_activity_msgq, sizeof(struct gosteady_activity),
 	      ACTIVITY_MSGQ_DEPTH, 4);
 
+/* FMEA 1.3 (2026-05-10): activity publish retry budget on PUBACK
+ * timeout / connect failure. Same linear-backoff schedule as the
+ * heartbeat path — 1 / 5 / 15 min. After 3 failed attempts we drop
+ * the activity (the .dat file remains on flash for offline analysis;
+ * the auto-prune-on-PUBACK path doesn't fire on failure). 21 minutes
+ * total bounded effort matches the heartbeat reasoning: beyond ~21
+ * min into a sustained outage, more retries don't help. Reboot
+ * survival waits on FMEA 6.3 telemetry_queue partition implementation. */
+#define ACTIVITY_MAX_RETRIES 3
+static const k_timeout_t ACTIVITY_RETRY_DELAYS[ACTIVITY_MAX_RETRIES] = {
+	K_SECONDS(60),       /* 1st retry: 1 min */
+	K_SECONDS(60 * 5),   /* 2nd retry: 5 min */
+	K_SECONDS(60 * 15),  /* 3rd retry: 15 min */
+};
+
 /* Serializes aws_iot lib operations between heartbeat + activity workers.
  * aws_iot_init/connect/send/disconnect are not safe to interleave from
  * multiple threads. */
@@ -652,6 +667,17 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 
 	APPEND_OR_FAIL(",\"watchdog_hits\":%u",
 		       (unsigned)gosteady_forensics_get_watchdog_hits());
+
+	/* FMEA 4.7 (2026-05-10): boot_count from forensics record. Lets
+	 * cloud-side correlate fault_counter increments with discrete
+	 * boot events — answers "did fault_count change BETWEEN boots,
+	 * or during this boot?" by comparing deltas. Distinct from the
+	 * /lfs/boot_count file which lives behind a successful LittleFS
+	 * mount; the forensics counter is bumped at the very top of
+	 * gosteady_forensics_init() so it tracks every boot regardless
+	 * of /lfs state. */
+	APPEND_OR_FAIL(",\"boot_count\":%u",
+		       (unsigned)gosteady_forensics_get_boot_count());
 #endif
 
 #undef APPEND_OR_FAIL
@@ -749,6 +775,20 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 	while (1) {
 		LOG_INF("heartbeat tick #%d (cadence=%d s)", iter++,
 			(int)k_ticks_to_ms_floor32(HEARTBEAT_INTERVAL.ticks) / 1000);
+
+#if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
+		/* FMEA 6.1 (2026-05-10): hourly snippet rotation. Stale-cutoff
+		 * pass uses cellular UTC (available by now since this thread
+		 * already passed wait_for_cellular_ready before the loop).
+		 * Free-space pass runs regardless of cellular state. Cheap
+		 * when partition is healthy (no-op iteration). */
+		int rotated = gosteady_snippet_rotate(GOSTEADY_SNIPPET_STALE_AGE_S,
+						       GOSTEADY_SNIPPET_ROTATE_THRESHOLD);
+		if (rotated > 0) {
+			LOG_INF("heartbeat tick: snippet rotation deleted %d", rotated);
+		}
+#endif
+
 		int rc = heartbeat_publish_with_retry(topic, (size_t)t);
 		if (rc != 0) {
 			LOG_ERR("heartbeat tick #%d FAILED after %d attempts (%d) — waiting for next interval",
@@ -842,8 +882,64 @@ static void activity_worker_thread_fn(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		LOG_INF("activity worker: dequeued session_end=%s steps=%u distance_ft=%.2f",
-			a.session_end_utc_iso, (unsigned)a.steps, (double)a.distance_ft);
+		LOG_INF("activity worker: dequeued session_end=%s steps=%u distance_ft=%.2f%s",
+			a.session_end_utc_iso, (unsigned)a.steps, (double)a.distance_ft,
+			(a.retry_count > 0) ? " (retry)" : "");
+
+		/* FMEA 1.1+1.2 (2026-05-10): retro-stamp empty session_start /
+		 * session_end ISO strings using uptime deltas + current cellular
+		 * UTC. Handles cold-boot-mid-motion (cellular not yet attached
+		 * at session_start) and cellular-flap-mid-session (cellular not
+		 * attached at session_stop). connect_publish_disconnect below
+		 * waits for cellular ready, but its wait happens AFTER payload
+		 * build; we need the strings populated BEFORE build_activity_
+		 * payload, so do an explicit cellular check here. If cellular
+		 * is still unavailable, leave empty and the publish-side cloud
+		 * validator will reject — but the FMEA 1.3 retry path will
+		 * pick it back up. */
+		if ((a.session_start_utc_iso[0] == '\0' && a.session_start_uptime_ms != 0) ||
+		    (a.session_end_utc_iso[0] == '\0'   && a.session_end_uptime_ms != 0)) {
+			int64_t now_unix_ms = 0;
+			int t_err = gosteady_cellular_get_network_time_unix_ms(&now_unix_ms);
+			if (t_err == 0) {
+				uint32_t now_uptime = k_uptime_get_32();
+				if (a.session_start_utc_iso[0] == '\0' &&
+				    a.session_start_uptime_ms != 0) {
+					int64_t delta_ms = (int64_t)(now_uptime - a.session_start_uptime_ms);
+					int64_t start_unix = now_unix_ms - delta_ms;
+					int frc = gosteady_cellular_format_unix_ms_iso8601(
+						start_unix,
+						a.session_start_utc_iso,
+						sizeof(a.session_start_utc_iso));
+					if (frc == 0) {
+						LOG_INF("activity: retro-stamped session_start from uptime → %s (delta_ms=%lld)",
+							a.session_start_utc_iso,
+							(long long)delta_ms);
+					} else {
+						LOG_WRN("activity: format_unix_ms failed for session_start (%d)", frc);
+					}
+				}
+				if (a.session_end_utc_iso[0] == '\0' &&
+				    a.session_end_uptime_ms != 0) {
+					int64_t delta_ms = (int64_t)(now_uptime - a.session_end_uptime_ms);
+					int64_t end_unix = now_unix_ms - delta_ms;
+					int frc = gosteady_cellular_format_unix_ms_iso8601(
+						end_unix,
+						a.session_end_utc_iso,
+						sizeof(a.session_end_utc_iso));
+					if (frc == 0) {
+						LOG_INF("activity: retro-stamped session_end from uptime → %s (delta_ms=%lld)",
+							a.session_end_utc_iso,
+							(long long)delta_ms);
+					} else {
+						LOG_WRN("activity: format_unix_ms failed for session_end (%d)", frc);
+					}
+				}
+			} else {
+				LOG_WRN("activity: cellular UTC unavailable (%d) — publish will have empty timestamp(s); FMEA 1.3 retry will re-attempt",
+					t_err);
+			}
+		}
 
 		char payload[ACTIVITY_PAYLOAD_MAX];
 		size_t payload_len = 0;
@@ -861,10 +957,36 @@ static void activity_worker_thread_fn(void *p1, void *p2, void *p3)
 		int prc = connect_publish_disconnect(topic, (size_t)t,
 						     payload, payload_len);
 		if (prc) {
-			LOG_WRN("activity publish failed: %d (session file still on flash; will not retry)",
-				prc);
+			/* FMEA 1.3 (2026-05-10): in-memory retry with linear
+			 * backoff. Same 1/5/15 min schedule as heartbeat.
+			 * After ACTIVITY_MAX_RETRIES failed attempts, drop
+			 * the activity — .dat survives on flash but isn't in
+			 * any queue. Reboot-survival depends on FMEA 6.3
+			 * telemetry_queue (deferred separately). */
+			a.retry_count++;
+			if (a.retry_count <= ACTIVITY_MAX_RETRIES) {
+				int delay_idx = a.retry_count - 1;
+				int delay_s = (int)(k_ticks_to_ms_floor32(
+					ACTIVITY_RETRY_DELAYS[delay_idx].ticks) / 1000);
+				LOG_WRN("activity publish failed (%d) — retry %u/%u in %d s (uuid=%s)",
+					prc, a.retry_count, ACTIVITY_MAX_RETRIES,
+					delay_s,
+					a.session_uuid[0] ? a.session_uuid : "<no-uuid>");
+				k_sleep(ACTIVITY_RETRY_DELAYS[delay_idx]);
+				int rqc = k_msgq_put(&s_activity_msgq, &a, K_NO_WAIT);
+				if (rqc < 0) {
+					LOG_ERR("activity re-enqueue failed (%d) — DROPPING session %s",
+						rqc,
+						a.session_uuid[0] ? a.session_uuid : "<no-uuid>");
+				}
+			} else {
+				LOG_ERR("activity publish failed (%d) after %u retries — DROPPING session %s (.dat preserved on flash)",
+					prc, ACTIVITY_MAX_RETRIES,
+					a.session_uuid[0] ? a.session_uuid : "<no-uuid>");
+			}
 		} else {
-			LOG_INF("M12.1d activity uplink sequence complete");
+			LOG_INF("M12.1d activity uplink sequence complete%s",
+				(a.retry_count > 0) ? " (after retry)" : "");
 			/* Phase 1.6 follow-up 2026-05-05: auto-prune the .dat
 			 * file after successful PUBACK. The algo outputs are
 			 * now in cloud's Activity Series DDB; the snippet on

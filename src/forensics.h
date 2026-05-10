@@ -66,6 +66,17 @@ uint32_t gosteady_forensics_get_watchdog_hits(void);
 uint32_t gosteady_forensics_get_assert_count(void);
 
 /*
+ * Cumulative boot count from the persisted forensics record. Bumped at
+ * the very top of gosteady_forensics_init() so it tracks every boot
+ * before any other init can fail. Distinct from the /lfs/boot_count file
+ * (which lives behind a successful LittleFS mount). Surfaced via
+ * heartbeat extras (FMEA 4.7) so cloud can correlate fault-counter
+ * increments with discrete boot events — answers "did fault_count change
+ * BETWEEN boots, or during this boot?" by comparing deltas.
+ */
+uint32_t gosteady_forensics_get_boot_count(void);
+
+/*
  * Build a small JSON object of fault counters suitable for direct embed
  * into the heartbeat payload as the `fault_counters` field. Format:
  *   {"fatal":N,"asserts":N,"watchdog":N}
@@ -74,6 +85,24 @@ uint32_t gosteady_forensics_get_assert_count(void);
  */
 int gosteady_forensics_fault_counters_json(char *buf, size_t buflen,
 					   size_t *out_len);
+
+/*
+ * FMEA 4.1 (2026-05-10): zero the cumulative fault/watchdog/assert
+ * counters and persist immediately. boot_count, reset_reason, and
+ * last_fault are NOT reset — those track lifetime device state, not
+ * deployment lifecycle.
+ *
+ * Called from gosteady_activation_apply() on the transition from
+ * not-activated to activated. Signal: "this is a new deployment
+ * lifecycle; bench-test stress-counters from M14.5 unit shakedown
+ * are no longer relevant." Without this reset, every shipping unit
+ * carries fault_counters from its CRASH/STALL stress validation
+ * forever — operator dashboard misreads as "device was unhealthy."
+ *
+ * Returns 0 on success, negative errno on flash error. Idempotent:
+ * safe to call when counters are already zero.
+ */
+int gosteady_forensics_reset_counters(void);
 
 /*
  * Uptime since the most recent boot, in seconds. Wraps at ~136 years.

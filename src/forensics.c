@@ -219,6 +219,36 @@ uint32_t gosteady_forensics_get_assert_count(void)
 	return atomic_get(&s_initialized) ? s_record.assert_count : 0;
 }
 
+uint32_t gosteady_forensics_get_boot_count(void)
+{
+	return atomic_get(&s_initialized) ? s_record.boot_count : 0;
+}
+
+int gosteady_forensics_reset_counters(void)
+{
+	if (!atomic_get(&s_initialized)) {
+		return -ENODEV;
+	}
+	k_mutex_lock(&s_lock, K_FOREVER);
+	uint32_t prev_fault    = s_record.fault_count;
+	uint32_t prev_watchdog = s_record.watchdog_hits;
+	uint32_t prev_assert   = s_record.assert_count;
+	s_record.fault_count   = 0;
+	s_record.watchdog_hits = 0;
+	s_record.assert_count  = 0;
+	int ret = forensics_write_locked(&s_record);
+	k_mutex_unlock(&s_lock);
+	if (ret < 0) {
+		LOG_ERR("forensics_reset_counters: persist failed (%d) — counters revert on next boot",
+			ret);
+		return ret;
+	}
+	LOG_INF("forensics counters reset: fault %u→0, watchdog %u→0, asserts %u→0 (boot_count=%u preserved)",
+		(unsigned)prev_fault, (unsigned)prev_watchdog,
+		(unsigned)prev_assert, (unsigned)s_record.boot_count);
+	return 0;
+}
+
 uint32_t gosteady_forensics_get_uptime_s(void)
 {
 	return (uint32_t)(k_uptime_get() / 1000);

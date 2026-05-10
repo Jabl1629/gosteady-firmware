@@ -971,6 +971,16 @@ int main(void)
 		LOG_WRN("LittleFS bring-up failed — session logging disabled");
 	}
 
+	/* FMEA 6.2 (2026-05-10): boot-time orphan sweep — delete any stale
+	 * .dat files in /lfs/sessions left over from previous boots. Any
+	 * .dat present here is a session whose PUBACK didn't return before
+	 * the previous shutdown; without persistent telemetry queue (FMEA
+	 * 6.3, deferred), those files are unreachable for republish anyway,
+	 * so bound partition growth by deleting them. Runs BEFORE sampler /
+	 * auto-start threads spawn so no in-flight session can race the
+	 * sweep. Non-fatal — failure just leaves cruft. */
+	(void)gosteady_session_orphan_sweep();
+
 	/* M12.1e.2: load persisted activation state. Must run AFTER /lfs
 	 * is mounted (record lives at /lfs/activation.bin) and BEFORE the
 	 * sampler / auto-start threads spawn (so the pre-activation gate

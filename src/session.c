@@ -692,6 +692,16 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 		(void)snprintk(a.session_uuid, sizeof(a.session_uuid),
 			       "%s", uuid_str);
 
+		/* FMEA 1.1+1.2 (2026-05-10): pass start/stop uptime values so
+		 * cloud.c's activity worker can retro-stamp session_start /
+		 * session_end ISO 8601 strings just before publish if cellular
+		 * UTC was unavailable at capture time (cold-boot mid-motion,
+		 * or cellular flap during the session). The worker waits for
+		 * cellular ready before publish, so by the time it formats the
+		 * strings, cellular UTC is available. */
+		a.session_start_uptime_ms = s_session_start_uptime_ms;
+		a.session_end_uptime_ms   = k_uptime_get_32();
+
 		int rc = gosteady_cloud_publish_activity(&a);
 		if (rc) {
 			LOG_WRN("activity enqueue failed: %d (session file still on flash)", rc);
@@ -725,6 +735,64 @@ int gosteady_session_get_uuid_str(char *out, size_t out_sz)
 bool gosteady_session_flash_full(void)
 {
 	return s_writer_flash_full;
+}
+
+int gosteady_session_orphan_sweep(void)
+{
+	struct fs_dir_t dir;
+	fs_dir_t_init(&dir);
+	int ret = fs_opendir(&dir, SESSION_DIR);
+	if (ret < 0) {
+		if (ret == -ENOENT) {
+			/* Sessions dir doesn't exist yet — nothing to sweep.
+			 * It'll be created on the first session_start. */
+			return 0;
+		}
+		LOG_WRN("orphan_sweep: fs_opendir(%s) failed (%d)",
+			SESSION_DIR, ret);
+		return ret;
+	}
+
+	int deleted = 0;
+	struct fs_dirent ent;
+	while (1) {
+		int rc = fs_readdir(&dir, &ent);
+		if (rc < 0) {
+			LOG_WRN("orphan_sweep: fs_readdir failed (%d)", rc);
+			break;
+		}
+		if (ent.name[0] == '\0') {
+			/* End of directory. */
+			break;
+		}
+		size_t nlen = strlen(ent.name);
+		if (nlen <= 4 || strcmp(ent.name + nlen - 4, ".dat") != 0) {
+			continue;
+		}
+		char path[sizeof(SESSION_DIR) + 1 + 64 + 1];
+		int n = snprintk(path, sizeof(path), "%s/%s",
+				 SESSION_DIR, ent.name);
+		if (n < 0 || (size_t)n >= sizeof(path)) {
+			LOG_WRN("orphan_sweep: path too long for %s — skipping",
+				ent.name);
+			continue;
+		}
+		int urc = fs_unlink(path);
+		if (urc == 0) {
+			deleted++;
+		} else {
+			LOG_WRN("orphan_sweep: fs_unlink %s failed (%d)",
+				path, urc);
+		}
+	}
+	(void)fs_closedir(&dir);
+	if (deleted > 0) {
+		LOG_INF("orphan_sweep: deleted %d stale .dat file(s) at boot",
+			deleted);
+	} else {
+		LOG_DBG("orphan_sweep: no stale .dat files");
+	}
+	return deleted;
 }
 
 int gosteady_session_prune(const char *uuid)

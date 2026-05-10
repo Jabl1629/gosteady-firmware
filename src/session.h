@@ -240,6 +240,25 @@ int gosteady_session_prune(const char *uuid);
  * session_start of the next session. */
 bool gosteady_session_flash_full(void);
 
+/* FMEA 6.2 (2026-05-10): boot-time orphan sweep.
+ *
+ * Iterate /lfs/sessions/, fs_unlink every .dat file found. Called from
+ * main() at boot, AFTER LittleFS mount + activation_init succeed but
+ * BEFORE the sampler/writer threads start (so no session is in flight).
+ *
+ * Why we delete unconditionally rather than age-gating: LittleFS doesn't
+ * expose mtime via fs_dirent, so we can't reliably age-gate. Any .dat
+ * present at boot is an orphan from a previous boot's session whose
+ * PUBACK didn't return — those .dat files are unreachable for republish
+ * without a persistent telemetry queue (FMEA 6.3, deferred). Bounding
+ * partition growth wins over preserving potentially-republishable data
+ * we can't actually republish.
+ *
+ * Returns the number of files deleted, or negative errno on directory
+ * iteration error.
+ */
+int gosteady_session_orphan_sweep(void);
+
 #ifdef __cplusplus
 }
 #endif

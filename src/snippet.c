@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/fs/fs.h>
@@ -39,6 +40,9 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/timeutil.h>
+
+#include "cellular.h"  /* FMEA 6.1: stale-cutoff needs current cellular UTC */
 
 LOG_MODULE_REGISTER(gs_snippet, LOG_LEVEL_INF);
 
@@ -116,6 +120,247 @@ static void path_for(const char *uuid, const char *suffix, char *out, size_t out
 	(void)snprintf(out, out_sz, SNIPPET_MNT "/%s%s", uuid, suffix);
 }
 
+/* ---- FMEA 6.1: rotation policy helpers ---- */
+
+/* Parse "YYYY-MM-DDTHH:MM:SSZ" to Unix-epoch milliseconds. Returns 0
+ * on success. Strict parser — only accepts the exact 20-char canonical
+ * form the firmware writes (cellular_format_unix_ms_iso8601). */
+static int parse_iso8601_unix_ms(const char *iso, int64_t *out_ms)
+{
+	int year, month, day, hour, minute, second;
+	int n = sscanf(iso, "%4d-%2d-%2dT%2d:%2d:%2dZ",
+		       &year, &month, &day, &hour, &minute, &second);
+	if (n != 6) {
+		return -EINVAL;
+	}
+	struct tm tm = {
+		.tm_year = year - 1900,
+		.tm_mon  = month - 1,
+		.tm_mday = day,
+		.tm_hour = hour,
+		.tm_min  = minute,
+		.tm_sec  = second,
+	};
+	int64_t epoch_s = timeutil_timegm64(&tm);
+	if (epoch_s == (int64_t)-1) {
+		return -EIO;
+	}
+	*out_ms = epoch_s * 1000;
+	return 0;
+}
+
+/* Read the JSON sidecar for a snippet UUID and extract window_start_ts.
+ * Sidecar format is fixed:
+ *   {"snippet_id":"<uuid>","window_start_ts":"YYYY-MM-DDTHH:MM:SSZ"}
+ * We use strstr (no Zephyr json lib dep) since the format is firmware-
+ * controlled. Returns 0 + fills out_ts (must be >= 24 bytes), -ENOENT
+ * if sidecar doesn't exist, -EINVAL if format is unparseable. */
+static int read_window_start_ts(const char *uuid, char *out_ts, size_t out_sz)
+{
+	if (!uuid || !out_ts || out_sz < 24) { return -EINVAL; }
+	char path[80];
+	path_for(uuid, ".json", path, sizeof(path));
+	struct fs_file_t f;
+	fs_file_t_init(&f);
+	int rc = fs_open(&f, path, FS_O_READ);
+	if (rc < 0) { return rc; }
+	char buf[MAX_JSON_BYTES + 1];
+	ssize_t n = fs_read(&f, buf, sizeof(buf) - 1);
+	(void)fs_close(&f);
+	if (n <= 0) { return -EIO; }
+	buf[n] = '\0';
+	const char *key = "\"window_start_ts\":\"";
+	const char *p = strstr(buf, key);
+	if (p == NULL) { return -EINVAL; }
+	p += strlen(key);
+	if ((size_t)(p - buf) + 20 + 1 > (size_t)n) { return -EINVAL; }
+	if (p[20] != '"') { return -EINVAL; }
+	memcpy(out_ts, p, 20);
+	out_ts[20] = '\0';
+	return 0;
+}
+
+/* Delete .bin + .json + .up for a snippet UUID. -ENOENT on the components
+ * is non-fatal (some may not exist). Returns the count of files actually
+ * unlinked. */
+static int delete_snippet_files(const char *uuid)
+{
+	int count = 0;
+	const char *suffixes[] = { ".bin", ".json", ".up" };
+	for (size_t i = 0; i < ARRAY_SIZE(suffixes); i++) {
+		char path[80];
+		path_for(uuid, suffixes[i], path, sizeof(path));
+		int rc = fs_unlink(path);
+		if (rc == 0) {
+			count++;
+		} else if (rc != -ENOENT) {
+			LOG_WRN("rotate: fs_unlink %s failed (%d)", path, rc);
+		}
+	}
+	return count;
+}
+
+/* Snapshot the currently-active capture's UUID under s_capture_lock. */
+static bool snapshot_active_uuid(char *out_uuid, size_t out_sz)
+{
+	if (!out_uuid || out_sz < 40) {
+		if (out_uuid && out_sz > 0) { out_uuid[0] = '\0'; }
+		return false;
+	}
+	bool active;
+	k_mutex_lock(&s_capture_lock, K_FOREVER);
+	active = s_cap.active;
+	if (active) {
+		strncpy(out_uuid, s_cap.uuid, out_sz - 1);
+		out_uuid[out_sz - 1] = '\0';
+	} else {
+		out_uuid[0] = '\0';
+	}
+	k_mutex_unlock(&s_capture_lock);
+	return active;
+}
+
+/* Pass 1: stale-cutoff. Iterate /snippets, for each .bin entry read its
+ * sidecar, parse window_start_ts, delete if older than threshold. */
+static int rotate_stale_pass(uint32_t stale_age_seconds, const char *active_uuid)
+{
+	int64_t now_ms = 0;
+	int t_err = gosteady_cellular_get_network_time_unix_ms(&now_ms);
+	if (t_err != 0) {
+		LOG_DBG("rotate: stale-pass skipped — cellular UTC unavailable (%d)",
+			t_err);
+		return 0;
+	}
+	int64_t threshold_ms = now_ms - (int64_t)stale_age_seconds * 1000;
+
+	struct fs_dir_t dir;
+	fs_dir_t_init(&dir);
+	int ret = fs_opendir(&dir, SNIPPET_MNT);
+	if (ret < 0) { return ret; }
+
+	int deleted = 0;
+	struct fs_dirent ent;
+	while (1) {
+		int rc = fs_readdir(&dir, &ent);
+		if (rc < 0 || ent.name[0] == '\0') { break; }
+		size_t nlen = strlen(ent.name);
+		if (nlen <= 4 || strcmp(ent.name + nlen - 4, ".bin") != 0) {
+			continue;
+		}
+		char uuid[40];
+		size_t ulen = nlen - 4;
+		if (ulen >= sizeof(uuid)) { continue; }
+		memcpy(uuid, ent.name, ulen);
+		uuid[ulen] = '\0';
+		if (active_uuid && active_uuid[0] != '\0' &&
+		    strcmp(uuid, active_uuid) == 0) {
+			continue;
+		}
+		char ts[24];
+		int srt = read_window_start_ts(uuid, ts, sizeof(ts));
+		if (srt < 0) {
+			/* Missing/malformed sidecar — orphan path in
+			 * upload_one handles that case; don't delete here
+			 * based on uncertain age. */
+			continue;
+		}
+		int64_t snip_ms = 0;
+		if (parse_iso8601_unix_ms(ts, &snip_ms) < 0) {
+			continue;
+		}
+		if (snip_ms < threshold_ms) {
+			LOG_INF("rotate: stale snippet %s (ts=%s, age=%lld s) — deleting",
+				uuid, ts,
+				(long long)((now_ms - snip_ms) / 1000));
+			(void)delete_snippet_files(uuid);
+			deleted++;
+		}
+	}
+	(void)fs_closedir(&dir);
+	return deleted;
+}
+
+/* Pass 2: free-space rotation. If utilization >= threshold_pct, delete
+ * the OLDEST .up-marked snippet (by readdir order). Loops until below
+ * threshold OR no .up marker remains. */
+static int rotate_freespace_pass(uint8_t threshold_pct, const char *active_uuid)
+{
+	int deleted = 0;
+	const int MAX_ITERATIONS = 64;
+	for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
+		struct fs_statvfs vfs;
+		int srt = fs_statvfs(SNIPPET_MNT, &vfs);
+		if (srt < 0 || vfs.f_blocks == 0) {
+			LOG_WRN("rotate: fs_statvfs failed (%d) — skipping freespace pass",
+				srt);
+			return deleted;
+		}
+		uint64_t total = (uint64_t)vfs.f_blocks * vfs.f_frsize;
+		uint64_t free  = (uint64_t)vfs.f_bfree  * vfs.f_frsize;
+		uint64_t used  = total - free;
+		uint8_t  used_pct = (total > 0) ? (uint8_t)((used * 100) / total) : 0;
+		if (used_pct < threshold_pct) {
+			if (deleted > 0) {
+				LOG_INF("rotate: freespace settled at %u%% used (deleted %d)",
+					(unsigned)used_pct, deleted);
+			}
+			return deleted;
+		}
+		struct fs_dir_t dir;
+		fs_dir_t_init(&dir);
+		int ret = fs_opendir(&dir, SNIPPET_MNT);
+		if (ret < 0) { return deleted; }
+		char victim[40];
+		victim[0] = '\0';
+		struct fs_dirent ent;
+		while (1) {
+			int rc = fs_readdir(&dir, &ent);
+			if (rc < 0 || ent.name[0] == '\0') { break; }
+			size_t nlen = strlen(ent.name);
+			if (nlen <= 3 || strcmp(ent.name + nlen - 3, ".up") != 0) {
+				continue;
+			}
+			size_t ulen = nlen - 3;
+			if (ulen >= sizeof(victim)) { continue; }
+			memcpy(victim, ent.name, ulen);
+			victim[ulen] = '\0';
+			if (active_uuid && active_uuid[0] != '\0' &&
+			    strcmp(victim, active_uuid) == 0) {
+				victim[0] = '\0';
+				continue;
+			}
+			break;
+		}
+		(void)fs_closedir(&dir);
+		if (victim[0] == '\0') {
+			LOG_WRN("rotate: %u%% used >= %u%% threshold but no .up-marked snippet to evict — partition pressure with all snippets pending upload",
+				(unsigned)used_pct, (unsigned)threshold_pct);
+			return deleted;
+		}
+		LOG_INF("rotate: freespace at %u%% — evicting %s",
+			(unsigned)used_pct, victim);
+		(void)delete_snippet_files(victim);
+		deleted++;
+	}
+	LOG_WRN("rotate: freespace pass hit MAX_ITERATIONS=%d — bailing", MAX_ITERATIONS);
+	return deleted;
+}
+
+int gosteady_snippet_rotate(uint32_t stale_age_seconds,
+			    uint8_t rotate_threshold_pct)
+{
+	if (!atomic_get(&s_initialized)) {
+		return -ENODEV;
+	}
+	char active_uuid[40];
+	(void)snapshot_active_uuid(active_uuid, sizeof(active_uuid));
+	int s = rotate_stale_pass(stale_age_seconds, active_uuid);
+	if (s < 0) { return s; }
+	int f = rotate_freespace_pass(rotate_threshold_pct, active_uuid);
+	if (f < 0) { return f; }
+	return s + f;
+}
+
 int gosteady_snippet_init(void)
 {
 	if (atomic_set(&s_initialized, 1) == 1) {
@@ -136,6 +381,19 @@ int gosteady_snippet_init(void)
 	}
 	(void)fs_mkdir(SNIPPET_MNT);  /* harmless if already exists */
 	memset(&s_cap, 0, sizeof(s_cap));
+
+	/* FMEA 6.1 (2026-05-10): boot-time rotation pass. Stale-cutoff is
+	 * skipped if cellular UTC isn't available yet (typical at boot —
+	 * cellular attaches a few seconds in). Free-space pass runs
+	 * regardless. The heartbeat-thread call below covers the steady-
+	 * state case where cellular IS up and we want stale-pass to run
+	 * periodically. */
+	int swept = gosteady_snippet_rotate(GOSTEADY_SNIPPET_STALE_AGE_S,
+					     GOSTEADY_SNIPPET_ROTATE_THRESHOLD);
+	if (swept > 0) {
+		LOG_INF("boot-time snippet rotation: %d snippet(s) deleted",
+			swept);
+	}
 	return 0;
 }
 
@@ -165,6 +423,13 @@ int gosteady_snippet_capture_start(const char *session_uuid_str,
 	if (!atomic_get(&s_initialized) || !session_uuid_str || !window_start_ts) {
 		return -EINVAL;
 	}
+
+	/* FMEA 6.1 (2026-05-10): pre-capture rotation pass. Bound the
+	 * capture-skip cascade — if the partition is at threshold, evict
+	 * one .up-marked snippet now so we have room. Run BEFORE acquiring
+	 * s_capture_lock to avoid a self-deadlock on snapshot_active_uuid. */
+	(void)gosteady_snippet_rotate(GOSTEADY_SNIPPET_STALE_AGE_S,
+				       GOSTEADY_SNIPPET_ROTATE_THRESHOLD);
 
 	k_mutex_lock(&s_capture_lock, K_FOREVER);
 

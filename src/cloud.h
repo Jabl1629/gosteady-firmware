@@ -66,6 +66,24 @@ struct gosteady_activity {
 	 * after a successful publish to bound sessions-partition growth.
 	 * Empty string = skip prune. */
 	char     session_uuid[37];            /* "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" + NUL */
+
+	/* FMEA 1.1+1.2 (2026-05-10): uptime values captured at session
+	 * start/stop. The activity worker resolves session_*_utc_iso
+	 * strings from these just before publish using current cellular
+	 * UTC + uptime delta. Handles cold-boot-mid-motion (cellular not
+	 * yet attached at session_start) and cellular-drops-mid-session
+	 * (cellular not available at session_stop). 0 means "skip retro-
+	 * stamp for this end" (defensive — caller should always populate). */
+	uint32_t session_start_uptime_ms;
+	uint32_t session_end_uptime_ms;
+
+	/* FMEA 1.3 (2026-05-10): in-memory retry counter for activity
+	 * publish failures (PUBACK timeout, cellular flap during connect,
+	 * etc.). Bumped by the activity worker on each failure; the worker
+	 * re-enqueues with a backoff sleep up to ACTIVITY_MAX_RETRIES
+	 * before giving up. Reset to zero by the original caller via
+	 * the struct's `= {0}` initializer in session.c. */
+	uint8_t  retry_count;
 };
 
 /*

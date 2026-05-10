@@ -67,6 +67,22 @@ int gosteady_cellular_get_network_time(char *buf, size_t buflen);
  */
 int gosteady_cellular_get_network_time_unix_ms(int64_t *out_ms);
 
+/*
+ * Format a Unix-epoch milliseconds value as ISO 8601 UTC string in the
+ * canonical "YYYY-MM-DDTHH:MM:SSZ" form (23 chars + NUL = 24 bytes).
+ *
+ * Pure formatter — does not touch the modem; safe to call without
+ * cellular registration. Used by cloud.c's activity worker to retro-
+ * stamp session_start / session_end ISO strings from uptime deltas
+ * captured at session_start/stop, when cellular UTC was unavailable
+ * at capture time but is available at publish time (FMEA 1.1, 1.2).
+ *
+ * Returns 0 on success, -EINVAL if `out_sz < 24` or `unix_ms` is
+ * negative, -EIO if gmtime_r fails.
+ */
+int gosteady_cellular_format_unix_ms_iso8601(int64_t unix_ms,
+					      char *out, size_t out_sz);
+
 #ifdef __cplusplus
 }
 #endif

@@ -48,6 +48,23 @@ extern "C" {
  */
 #define GOSTEADY_SNIPPET_WINDOW_MS  30000
 
+/* FMEA 6.1 (2026-05-10): snippet rotation policy parameters per the
+ * M10.5 spec. Bench-default values; can be overridden via Kconfig in a
+ * follow-up if field data shows the defaults are wrong.
+ *
+ * STALE_AGE_S:  any snippet whose window_start_ts is older than this
+ *               many seconds ago is unconditionally deleted (.bin +
+ *               .json + .up). 14 days aligns with the 90-day S3 hot-
+ *               storage lifecycle in the cloud spec — anything we held
+ *               on-device for 2 weeks isn't useful for v1.5 retrain.
+ *
+ * ROTATE_THRESHOLD_PCT: when partition utilization >= this %, delete
+ *               oldest .up-marked snippets until below threshold.
+ *               Never deletes un-uploaded snippets — those wait for
+ *               STALE_AGE_S to make them eligible. */
+#define GOSTEADY_SNIPPET_STALE_AGE_S       (14u * 24u * 3600u)
+#define GOSTEADY_SNIPPET_ROTATE_THRESHOLD  90u
+
 /*
  * Mount the snippet_storage LittleFS partition. Idempotent. Safe to call
  * once at boot, after the main /lfs is up. Returns 0 on success,
@@ -111,6 +128,33 @@ typedef int (*gosteady_snippet_publish_fn)(const uint8_t *payload,
 					    size_t payload_len);
 
 int gosteady_snippet_upload_one(gosteady_snippet_publish_fn publish_fn);
+
+/*
+ * FMEA 6.1 (2026-05-10): snippet partition rotation pass.
+ *
+ * Two phases:
+ *   1. Stale cutoff — delete (.bin + .json + .up) for any snippet whose
+ *      JSON sidecar window_start_ts is older than `stale_age_seconds`
+ *      ago. Requires cellular UTC to be available; silently skips this
+ *      phase otherwise.
+ *   2. Free-space rotation — if fs_statvfs reports utilization >=
+ *      `rotate_threshold_pct`, delete the oldest .up-marked snippet
+ *      (FIFO by readdir order, which is roughly insertion in LittleFS).
+ *      Loop until below threshold OR no .up-marked snippet remains.
+ *      Never deletes un-uploaded snippets.
+ *
+ * Defensive: skips deletion on bad signals (statvfs error, malformed
+ * sidecar, etc.) — never deletes based on uncertain data.
+ *
+ * Currently-active capture's UUID (held under s_capture_lock) is also
+ * skipped to avoid racing with capture_finish.
+ *
+ * Returns the total number of snippets deleted (across both phases),
+ * or negative errno on directory iteration failure. Bench-callers can
+ * use the return as a count for visibility logging.
+ */
+int gosteady_snippet_rotate(uint32_t stale_age_seconds,
+			    uint8_t rotate_threshold_pct);
 
 #ifdef __cplusplus
 }

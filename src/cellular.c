@@ -358,3 +358,28 @@ int gosteady_cellular_get_network_time_unix_ms(int64_t *out_ms)
 	*out_ms = epoch_s * 1000;
 	return 0;
 }
+
+int gosteady_cellular_format_unix_ms_iso8601(int64_t unix_ms,
+					      char *out, size_t out_sz)
+{
+	/* Pure formatter — does not touch the modem. Used by cloud.c's
+	 * activity worker (FMEA 1.1, 1.2) to retro-stamp session_start /
+	 * session_end ISO strings from uptime deltas captured at
+	 * session_start/stop, when cellular UTC was unavailable at capture
+	 * time but is available at publish time. */
+	if (!out || out_sz < 24 || unix_ms < 0) {
+		return -EINVAL;
+	}
+	time_t epoch_s = (time_t)(unix_ms / 1000);
+	struct tm tm;
+	if (gmtime_r(&epoch_s, &tm) == NULL) {
+		return -EIO;
+	}
+	int n = snprintf(out, out_sz, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+			 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+			 tm.tm_hour, tm.tm_min, tm.tm_sec);
+	if (n < 0 || (size_t)n >= out_sz) {
+		return -ENOMEM;
+	}
+	return 0;
+}
