@@ -19,10 +19,12 @@
 
 #include "cellular.h"
 
+#include <stdio.h>
 #include <time.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/timeutil.h>
 
 #include <modem/lte_lc.h>
@@ -78,6 +80,124 @@ static const char *mode_str(enum lte_lc_lte_mode m)
 	}
 }
 
+/* ---- Bounded-timeout AT command wrapper (firmware-coord §C11.5) ----
+ *
+ * Background:
+ *   Under sustained modem contention (e.g. an exhausted SIM driving a
+ *   tight PDN-reject reattach loop), `nrf_modem_at_scanf` / `_at_cmd`
+ *   block synchronously past the 60 s WDT envelope, killing the caller
+ *   thread. The 2026-05-11/12 conference produced this failure mode
+ *   end-to-end (1 watchdog + 1 fatal + 3 reboots; coord §C11.2/§C11.4).
+ *   §C10.5 had predicted it six days earlier as the "M14.5 watch item".
+ *
+ * Design:
+ *   A dedicated worker thread runs the (blocking) `nrf_modem_at_cmd`.
+ *   Callers post the command via `at_request_sem` and wait for the
+ *   response on `at_response_sem` with a bounded timeout. If the
+ *   timeout fires, the caller returns `-ETIMEDOUT`; the worker may
+ *   continue blocking until the modem eventually responds, but the
+ *   caller's thread (often main.c's auto-start coordinator) is freed.
+ *
+ *   `session_start`'s callers translate `-ETIMEDOUT` to `-EAGAIN` so
+ *   the existing FMEA 1.1 retro-stamp path picks up cleanly — session
+ *   opens with `start_utc=unavailable`, the timestamp is filled in at
+ *   `session_stop` (or by the activity worker's republish path).
+ *
+ * Race handling:
+ *   A monotonic request sequence number is stamped per call. The
+ *   worker writes the sequence back into `at_response_seq` after the
+ *   AT call returns. Callers compare on wake: if the sequence doesn't
+ *   match, they got a stale response from a prior timed-out caller and
+ *   return `-ETIMEDOUT` themselves. The caller-side mutex serializes
+ *   wrapper invocations; the `at_request_sem` has max=1 so concurrent
+ *   `give()` calls collapse safely (the worker will service the most-
+ *   recent in-flight cmd, and stale responses are filtered by seq).
+ *
+ * Timeout choice:
+ *   2000 ms — far below the 60 s WDT envelope, comfortably above the
+ *   typical AT round-trip time (<100 ms per §C10.5 bench observation).
+ */
+
+#define AT_DEFAULT_TIMEOUT_MS     2000
+#define AT_RESPONSE_BUF_SIZE      128
+
+/* Dispatch slots — the at worker runs INSIDE the reporter thread to avoid
+ * adding a second 2 KB stack (RAM was already at 99.76% pre-patch per
+ * coord §C10.6). The reporter's main loop polls at_request_sem with a
+ * timeout: on sem fire, run the AT cmd; on timeout, do the periodic
+ * signal+time poll. AT cmds get priority — periodic poll runs whenever
+ * the reporter is otherwise idle. */
+static K_SEM_DEFINE(at_request_sem, 0, 1);
+static K_SEM_DEFINE(at_response_sem, 0, 1);
+static K_MUTEX_DEFINE(at_caller_mutex);
+
+static atomic_t at_request_seq  = ATOMIC_INIT(0);
+static atomic_t at_response_seq = ATOMIC_INIT(0);
+
+static const char *at_pending_cmd;
+static int         at_pending_result;
+static char        at_pending_response[AT_RESPONSE_BUF_SIZE];
+
+/* Called by reporter_entry when at_request_sem fires. Runs in the reporter
+ * thread context (its 2 KB stack is plenty for nrf_modem_at_cmd). */
+static void at_worker_service_one(void)
+{
+	atomic_val_t my_seq = atomic_get(&at_request_seq);
+	int64_t t0 = k_uptime_get();
+	at_pending_result = nrf_modem_at_cmd(at_pending_response,
+					      sizeof(at_pending_response),
+					      "%s", at_pending_cmd);
+	int64_t elapsed = k_uptime_get() - t0;
+	atomic_set(&at_response_seq, my_seq);
+	if (elapsed > AT_DEFAULT_TIMEOUT_MS) {
+		LOG_WRN("at cmd '%s' took %lld ms (>timeout); caller may have given up",
+			at_pending_cmd, elapsed);
+	}
+	k_sem_give(&at_response_sem);
+}
+
+/* Synchronous AT command with bounded caller-side wait.
+ * Returns nrf_modem_at_cmd's result on success; -ETIMEDOUT if the modem
+ * doesn't respond within timeout_ms; -EINVAL on bad args.
+ */
+static int at_cmd_with_timeout(const char *cmd, char *out, size_t outlen,
+			       int timeout_ms)
+{
+	if (!cmd || !out || outlen == 0) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&at_caller_mutex, K_FOREVER);
+
+	atomic_val_t my_seq = atomic_inc(&at_request_seq) + 1;
+	at_pending_cmd = cmd;
+	k_sem_reset(&at_response_sem);   /* drop any stale give from a prior caller */
+	k_sem_give(&at_request_sem);     /* wake worker */
+
+	int err = k_sem_take(&at_response_sem, K_MSEC(timeout_ms));
+	if (err == -EAGAIN) {
+		LOG_WRN("at cmd timed out after %d ms (modem contention?): %s",
+			timeout_ms, cmd);
+		k_mutex_unlock(&at_caller_mutex);
+		return -ETIMEDOUT;
+	}
+
+	if (atomic_get(&at_response_seq) != my_seq) {
+		LOG_WRN("at cmd: stale response (got seq %ld, wanted %ld); treating as timeout: %s",
+			(long)atomic_get(&at_response_seq), (long)my_seq, cmd);
+		k_mutex_unlock(&at_caller_mutex);
+		return -ETIMEDOUT;
+	}
+
+	int rc = at_pending_result;
+	if (rc >= 0) {
+		strncpy(out, at_pending_response, outlen - 1);
+		out[outlen - 1] = '\0';
+	}
+	k_mutex_unlock(&at_caller_mutex);
+	return rc;
+}
+
 /* Read AT+CESQ for RSRP/SNR. AT+CESQ returns:
  *   +CESQ: <rxlev>,<ber>,<rscp>,<ecno>,<rsrq>,<rsrp>
  * where rsrp is mapped per 3GPP TS 36.133:
@@ -85,6 +205,12 @@ static const char *mode_str(enum lte_lc_lte_mode m)
  *   1..96 => -141 + N dBm (i.e. N=1 -> -140, N=96 -> -45)
  *   97    => RSRP >= -44 dBm
  *   255   => not known
+ *
+ * Note: read_signal runs on the cellular reporter thread (line ~240),
+ * not in session_start's critical path, so the synchronous bare
+ * nrf_modem_at_scanf here is acceptable. session_start's CCLK calls
+ * use at_cmd_with_timeout() — see read_network_time_iso8601() and
+ * gosteady_cellular_get_network_time_unix_ms() below.
  */
 static int read_signal(int16_t *rsrp_dbm, int8_t *snr_db)
 {
@@ -131,10 +257,49 @@ static int read_signal(int16_t *rsrp_dbm, int8_t *snr_db)
 	return 0;
 }
 
+/* Bare AT+CCLK? read — no wrapper, used by the reporter thread itself
+ * (calling at_cmd_with_timeout from the reporter would self-deadlock:
+ * the wrapper gives at_request_sem, which only the reporter consumes,
+ * but the reporter is blocked waiting on at_response_sem). */
+static int read_network_time_iso8601_bare(char *out, size_t outlen)
+{
+	if (outlen < 24) {
+		return -EINVAL;
+	}
+
+	int year, month, day, hour, minute, second, tz;
+	int err = nrf_modem_at_scanf("AT+CCLK?",
+		"+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
+		&year, &month, &day, &hour, &minute, &second, &tz);
+	if (err < 0) {
+		return -EIO;
+	}
+	if (err < 7) {
+		return -EAGAIN;
+	}
+
+	(void)snprintf(out, outlen, "20%02d-%02d-%02dT%02d:%02d:%02dZ",
+		year, month, day, hour, minute, second);
+	return 0;
+}
+
 static int read_network_time_iso8601(char *out, size_t outlen)
 {
 	if (outlen < 24) {
 		return -EINVAL;
+	}
+
+	/* §C11.5: bounded-timeout AT call. -ETIMEDOUT under modem contention
+	 * becomes -EAGAIN to the caller (session.c treats -EAGAIN as
+	 * "cellular UTC unavailable, FMEA 1.1 retro-stamp will re-attempt"). */
+	char resp[64];
+	int err = at_cmd_with_timeout("AT+CCLK?", resp, sizeof(resp),
+				       AT_DEFAULT_TIMEOUT_MS);
+	if (err == -ETIMEDOUT) {
+		return -EAGAIN;
+	}
+	if (err < 0) {
+		return -EIO;
 	}
 
 	/* +CCLK: "yy/MM/dd,hh:mm:ss±zz"
@@ -144,13 +309,9 @@ static int read_network_time_iso8601(char *out, size_t outlen)
 	 * network, which is what we'll see at the bench.
 	 */
 	int year, month, day, hour, minute, second, tz;
-	int err = nrf_modem_at_scanf("AT+CCLK?",
-		"+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
-		&year, &month, &day, &hour, &minute, &second, &tz);
-	if (err < 0) {
-		return -EIO;
-	}
-	if (err < 7) {
+	int n = sscanf(resp, "+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
+		       &year, &month, &day, &hour, &minute, &second, &tz);
+	if (n < 7) {
 		/* Modem hasn't received NITZ yet. */
 		return -EAGAIN;
 	}
@@ -227,7 +388,8 @@ static void log_signal_and_time(void)
 	}
 
 	char ts[32];
-	err = read_network_time_iso8601(ts, sizeof(ts));
+	/* Reporter calls bare (no wrapper) — see read_network_time_iso8601_bare. */
+	err = read_network_time_iso8601_bare(ts, sizeof(ts));
 	if (err == 0) {
 		LOG_INF("network_time=%s", ts);
 	} else if (err == -EAGAIN) {
@@ -241,18 +403,55 @@ static void reporter_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
 
-	/* Block until first registration. */
-	(void)k_sem_take(&registered_sem, K_FOREVER);
-	LOG_INF("registered — first signal/time poll in 5 s");
-	/* Brief settle so the modem has a chance to receive NITZ from the
-	 * network before we ask for time. */
-	k_msleep(5000);
+	LOG_INF("at_worker servicing on reporter thread (default timeout=%d ms)",
+		AT_DEFAULT_TIMEOUT_MS);
 
+	/* Block until first registration. Callers of at_cmd_with_timeout
+	 * gate on s_registered, so no AT requests are expected before this
+	 * point — and if any sneak in, they'll just time out (safe). */
+	(void)k_sem_take(&registered_sem, K_FOREVER);
+	LOG_INF("registered — first signal/time poll in 5 s "
+		"(servicing AT requests during settle)");
+	/* Settle period for NITZ arrival before our own time poll. Service
+	 * AT requests during the wait — otherwise gs_cloud's immediate
+	 * post-registration AT+CCLK? gets stuck for ~2.5 s and the
+	 * at_cmd_with_timeout wrapper logs a spurious "modem contention?"
+	 * warning even on healthy cellular. */
+	int64_t settle_deadline = k_uptime_get() + 5000;
+	while (k_uptime_get() < settle_deadline) {
+		int wait_ms = (int)(settle_deadline - k_uptime_get());
+		if (wait_ms <= 0) break;
+		int err = k_sem_take(&at_request_sem, K_MSEC(wait_ms));
+		if (err == 0) at_worker_service_one();
+	}
+
+	/* Main loop: interleave periodic signal+time poll with AT-cmd
+	 * dispatch. Poll-due check happens at the TOP of every iteration so
+	 * continuous AT request traffic (which gs_cloud generates during
+	 * post-registration setup) cannot starve the periodic poll. Without
+	 * this, log_signal_and_time() never runs, gs_cloud's signal-stats
+	 * wait never succeeds, and the heartbeat thread gives up after 60 s
+	 * with "cellular never became ready". */
+	int64_t next_poll_ms = k_uptime_get();   /* fire poll immediately on entry */
 	while (1) {
-		if (s_registered) {
+		int64_t now = k_uptime_get();
+
+		/* (a) Fire periodic poll if due. */
+		if (now >= next_poll_ms && s_registered) {
 			log_signal_and_time();
+			next_poll_ms = k_uptime_get() + REPORTER_PERIOD_MS;
+			continue;
 		}
-		k_msleep(REPORTER_PERIOD_MS);
+
+		/* (b) Wait for either an AT request OR until the next poll
+		 * is due, whichever fires first. */
+		int wait_ms = (int)(next_poll_ms - now);
+		if (wait_ms < 0) wait_ms = 0;
+		int err = k_sem_take(&at_request_sem, K_MSEC(wait_ms));
+		if (err == 0) {
+			at_worker_service_one();
+			/* loop back to (a) — may now be poll-due */
+		}
 	}
 }
 
@@ -283,6 +482,13 @@ int gosteady_cellular_start(void)
 		reporter_entry, NULL, NULL, NULL,
 		7, 0, K_NO_WAIT);
 	k_thread_name_set(&reporter_thread, "cell_reporter");
+	/* §C11.5: the reporter thread now also services bounded-timeout AT
+	 * cmd dispatch from at_cmd_with_timeout(). One thread does both
+	 * jobs because RAM was already at 99.76% pre-patch (coord §C10.6),
+	 * so adding a second dedicated AT worker thread overflowed the
+	 * region by ~2 KB. Folding into reporter saves the second 2 KB
+	 * stack + k_thread struct. AT cmds are prioritized over the
+	 * informational signal/time poll. */
 
 	s_started = true;
 	return 0;
@@ -326,14 +532,22 @@ int gosteady_cellular_get_network_time_unix_ms(int64_t *out_ms)
 		return -EAGAIN;
 	}
 
-	int year, month, day, hour, minute, second, tz;
-	int err = nrf_modem_at_scanf("AT+CCLK?",
-		"+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
-		&year, &month, &day, &hour, &minute, &second, &tz);
+	/* §C11.5: bounded-timeout AT call. -ETIMEDOUT → -EAGAIN so the
+	 * caller's existing FMEA 1.1 retro-stamp path handles it. */
+	char resp[64];
+	int err = at_cmd_with_timeout("AT+CCLK?", resp, sizeof(resp),
+				       AT_DEFAULT_TIMEOUT_MS);
+	if (err == -ETIMEDOUT) {
+		return -EAGAIN;
+	}
 	if (err < 0) {
 		return -EIO;
 	}
-	if (err < 7) {
+
+	int year, month, day, hour, minute, second, tz;
+	int n = sscanf(resp, "+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
+		       &year, &month, &day, &hour, &minute, &second, &tz);
+	if (n < 7) {
 		/* Modem hasn't received NITZ yet. */
 		return -EAGAIN;
 	}

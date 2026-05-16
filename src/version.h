@@ -22,11 +22,19 @@
  *                    activation (4.1), boot_count in heartbeat (4.7),
  *                    boot-time orphan sweep (6.2), snippet rotation
  *                    policy (6.1).
+ *   0.10.0-at-timeout firmware-coord §C11.5: bounded-timeout AT-cmd wrapper
+ *                    in cellular.c (at_cmd_with_timeout). Eliminates the
+ *                    session_start AT-serialization lockup that produced
+ *                    the May 11-12 conference watchdog/fatal cascade
+ *                    under sustained SIM-PDN-reject contention. CCLK
+ *                    calls now return -ETIMEDOUT after 2 s when modem
+ *                    is contended; session.c's FMEA 1.1 retro-stamp
+ *                    handles the -EAGAIN cleanly.
  */
 
 #ifndef GOSTEADY_VERSION_H_
 #define GOSTEADY_VERSION_H_
 
-#define GS_FIRMWARE_VERSION_STR "0.9.0-hardening"
+#define GS_FIRMWARE_VERSION_STR "0.10.0-at-timeout"
 
 #endif /* GOSTEADY_VERSION_H_ */
