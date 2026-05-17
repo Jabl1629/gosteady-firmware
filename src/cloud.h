@@ -57,7 +57,10 @@ struct gosteady_activity {
 	uint32_t active_min;
 	float    roughness_R;                 /* NaN → omit */
 	uint8_t  surface_class;               /* 0xFF → omit */
-	char     firmware_version[16];        /* "" → omit */
+	/* [16] was too small for "0.10.0-at-timeout" (17 chars + null = 18 bytes);
+	 * surfaced 2026-05-17 — payload showed "firmware_version":"0.10.0-at-timeo"
+	 * (2 chars truncated). Bumped to [32] for headroom. "" → omit. */
+	char     firmware_version[32];
 	/* Phase 1.6 follow-up 2026-05-05: session UUID for auto-prune-on-
 	 * publish-success. After PUBACK on the activity uplink, the .dat
 	 * file at /lfs/sessions/{uuid}.dat becomes redundant (algo outputs

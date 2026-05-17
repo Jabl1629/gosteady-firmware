@@ -78,7 +78,7 @@ LOG_MODULE_REGISTER(gs_cloud, LOG_LEVEL_INF);
 static char s_cmd_topic[TOPIC_MAX];
 static struct mqtt_topic s_app_topics[1];
 /* Production heartbeat payload sized for: 5 required fields + battery_mv +
- * firmware + uptime_s + last_cmd_id (≤32) + reset_reason (≤64) +
+ * firmware + uptime_s + last_cmd_id (≤47) + reset_reason (≤64) +
  * fault_counters object + watchdog_hits + structural overhead. ~360 B max
  * observed; 512 B leaves comfortable headroom for future schema additions. */
 #define HEARTBEAT_PAYLOAD_MAX 512
@@ -146,7 +146,12 @@ static atomic_t s_initialized = ATOMIC_INIT(0);
  * arrives. Empty string means "no cmd seen yet" → field omitted from
  * payload (cloud accepts missing optional). */
 static K_MUTEX_DEFINE(s_last_cmd_lock);
-static char s_last_cmd_id[40] = { 0 };  /* "act_<uuid>" plausibly fits in 40 */
+/* "act_<uuid>" is 40 chars (4 + 36), so needs 41 bytes incl. null. Earlier
+ * [40] silently truncated trailing char and broke cloud-side ack matching
+ * (surfaced 2026-05-17 during first real 2A-DL roundtrip on GS9999999998 —
+ * cmd_id act_f60782db-9a38-43f1-b657-d502be65c432 became ...d502be65c43).
+ * Sized [48] for 7-byte headroom against any future cmd-prefix changes. */
+static char s_last_cmd_id[48] = { 0 };
 
 static const char *client_id(void)
 {
