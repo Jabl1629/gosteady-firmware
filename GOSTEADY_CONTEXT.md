@@ -11,7 +11,7 @@ GoSteady is a smart walker cap — a small device that attaches to a walker leg 
 
 Prototype platform: **Nordic Thingy:91 X**, board target `thingy91x/nrf9151/ns` (non-secure, TF-M in secure partition). Production will move to a custom PCB.
 
-Firmware version: **`0.9.0-hardening`** (M14.5-shakedown candidate as of 2026-05-10).
+Firmware version: **`0.10.0-at-timeout`** (as of 2026-05-17 — adds bounded-timeout AT wrapper in `cellular.c`, closes the §C10.5 watch-item / §C11.5 firmware fix; commit `95f87e6`). Previous version: `0.9.0-hardening` (M14.5-shakedown candidate from 2026-05-10).
 Repo: `https://github.com/Jabl1629/gosteady-firmware` — direct-to-`main` workflow (no PRs).
 Cowork pattern: single Claude operates both this firmware repo and `gosteady-portal` (cloud). They were separate sessions through 2026-05-06; merged 2026-05-10. The shared coord doc is now a "shared engineering log" rather than cross-team broadcast.
 
@@ -129,11 +129,18 @@ gosteady-firmware/
 
 ---
 
-## Current state (2026-05-10)
+## Current state (2026-05-17)
 
-**Done end-to-end:** capture pipeline (M1–M7) → Python algo + C port (M9 / M10) → deployment requirements (M10.5) → power architecture (M14-prep Phase 1a–5: ADXL367 wake-on-motion, BMI270 PM, auto-start coordinator, auto-stop, FIELD_MODE Kconfig) → cellular (M12.1a) → all 4 cloud uplinks bench-validated (heartbeat/activity/activate-cmd/snippet) → M10.7 production telemetry (storage repartition, nPM1300, crash forensics + WDT) → **M14.5 hardening sprint (2026-05-10) shipped 6 of 9 punch-list items per HARDENING_FMEA-in-§Failure-mode-reference**.
+**Done end-to-end:** capture pipeline (M1–M7) → Python algo + C port (M9 / M10) → deployment requirements (M10.5) → power architecture (M14-prep Phase 1a–5: ADXL367 wake-on-motion, BMI270 PM, auto-start coordinator, auto-stop, FIELD_MODE Kconfig) → cellular (M12.1a) → all 4 cloud uplinks bench-validated (heartbeat/activity/activate-cmd/snippet) → M10.7 production telemetry (storage repartition, nPM1300, crash forensics + WDT) → **M14.5 hardening sprint (2026-05-10) shipped 6 of 9 punch-list items** → **2026-05-11/12 informal conference site-survey** produced 1 WDT + 1 fatal + 3 reboots (Onomondo SIM exhausted → tight PDN-reject loop → §C10.5 AT-serialization watch-item triggered; full forensics in coord §C11) → **§C11.5 firmware fix shipped 2026-05-16 in 0.10.0-at-timeout** (bounded-timeout AT wrapper in `cellular.c`; commit `95f87e6`; bench-validated on `GS9999999998` per coord §C12).
 
-**Bench unit `GS9999999999`** running `0.9.0-hardening`, activated, cellular registered, hourly heartbeat publishing all extras (boot_count, fault_counters, watchdog_hits, etc.). Sessions partition empty (auto-prune working). Snippet partition healthy. **M14.5-ship candidate.**
+**Dev units:**
+
+| Serial | Firmware | J-Link | SIM | Status |
+|---|---|---|---|---|
+| `GS9999999999` | `0.9.0-hardening` | Broken pads (2 J-Link pins broke off mid-May) — cannot reflash | Onomondo (exhausted, EMM cause 19 on every PDN request) | Original bench unit. Held at 0.9.0 because no flash path. Can still publish if SIM is reactivated. |
+| `GS9999999998` | `0.10.0-at-timeout` | Working | iBasis trial (Nordic-shipped, 10 MB lifetime — fresh) | Provisioned 2026-05-16 per new-dev-unit-bringup playbook. **The §C11.5 patch-validation target.** Boot 6+, faults 0/0/0, hourly heartbeat publishing all extras. Bench-validated cleanly post-patch (zero AT timeouts on healthy cellular). |
+
+**Bench fleet snippet:** keep snippets enabled on `GS9999999998` for full pipeline validation; if iBasis trial nears exhaustion (snippets dominate ~300× heartbeats per the playbook sizing table), rebuild with `-DCONFIG_GOSTEADY_SNIPPET_ENABLE=n` for longevity.
 
 ### 15-step firmware arc — status
 
@@ -372,16 +379,16 @@ Firmware: persist `activated_at` to `/lfs/activation.bin`, exit pre-activation, 
 
 ### M14.5 watch items (validate during ≥7-day soak)
 
-- **Pre-existing 2 AT calls in `session_start`** STILL risk WDT lockup under sustained cellular contention. Today (2026-05-10) bench was unusual (RSRP -97, EMM cause 15, slow registration); typical conditions complete in <100 ms. Monitor for any session_start that takes >5 s as an early-warning signal of AT serialization. If observed, add explicit AT timeouts via `nrf_modem_at_cmd_async` or move AT-getting outside the session-open critical path.
+- ~~**Pre-existing 2 AT calls in `session_start`** STILL risk WDT lockup under sustained cellular contention.~~ **CLOSED 2026-05-16 in 0.10.0-at-timeout.** The conference exposure (coord §C11.2/§C11.4) reproduced the failure mode exactly as predicted: SIM exhaustion → tight PDN-reject loop starved `nrf_modem_at` → the 2 synchronous `AT+CCLK?` calls in `session_start` blocked past the 60 s WDT → 1 WDT + 1 fatal + 3 reboots. Firmware fix: bounded-timeout AT wrapper (`at_cmd_with_timeout`, 2 s) in `cellular.c`. `-ETIMEDOUT` → `-EAGAIN` → existing FMEA 1.1 retro-stamp path handles `session_start` proceeding without cellular UTC. Patch folded into existing reporter thread (RAM was 99.76 % pre-patch; dedicated worker overflowed by ~2 KB). Bench-validated on `GS9999999998` per coord §C12. Full deploy commit `95f87e6`. Real-world failure-path validation still opportunistic — will happen on next M14.5-style stress or deliberate SIM-exhaustion test.
 - **nPM1300 fuel-gauge accuracy** on actual LP803448 cell. If false-critical alerts fire at non-critical SoC, kick off bench discharge (FMEA 3.1).
 - **Snippet upload battery cost** under heavy cellular outage backlog (FMEA 3.2). Implement battery-floor gate if observed.
 - **Cellular re-attach** behavior after long outages (FMEA 2.4). Add periodic `lte_lc_offline()`+`normal()` if modem stuck in `searching` for hours.
 
 ### Cloud-side OPEN follow-ups (not firmware to fix, but worth knowing)
 
-- `activity_reject_count` alarm subscriber (sibling to FMEA 1.1 — published metric, no alarm).
+- ~~`activity_reject_count` alarm subscriber (sibling to FMEA 1.1 — published metric, no alarm).~~ **DONE 2026-05-17.** Cloud-side commit `3c47f0d` (added alarm in `handler-alarms.ts`), deployed 2026-05-17 to `GoSteady-Dev-Observability`. New alarm `gosteady-dev-activity-processor-activity-reject` watches the existing EMF metric; threshold > 0 in 5 min; routes to ops topic. Catalog now at 30 Observability alarms. Captured in coord §C13.
 - Phase 2A `device-shadow-handler` Lambda (gates FMEA 2.1 firmware completion).
-- Phase 1C offline detector Lambda (`lastSeen > 2 hr`).
+- Phase 1C offline detector Lambda (`lastSeen > 2 hr`) — surfaced as gap by the conference silent-failure (cap dark for 3 days 21 hrs, no alarm fired). Coord §C11.7 has the slim-scope sketch (EventBridge scheduled rule + Lambda scans Device Registry for `active_monitoring` devices with `lastSeen > 2 h`). Currently the highest-priority cloud increment per coord §C13.4.
 
 ---
 
@@ -477,6 +484,7 @@ Variable `serial` (PATTERN, default `GS9999999999`). Switch via dashboard UI. Wi
 - **Forensics in noinit RAM, drained at next-boot init** — flash writes from `k_sys_fatal_error_handler` don't survive `sys_reboot` timing on this nRF9151+TF-M platform. `sys_reboot(SYS_REBOOT_WARM)` retains SRAM; next-boot init drains noinit into the on-flash record where flash I/O is fully ready.
 - **`CONFIG_MQTT_CLEAN_SESSION=n`** — broker queues QoS 1 cmds across hourly heartbeats so cloud `activate` cmds aren't dropped.
 - **1.5 s linger after PUBACK** before disconnect — gives queued app-topic deliveries time to flow in before tear-down. ~0.5 mC additional cost per heartbeat.
+- **Bounded-timeout AT wrapper (`at_cmd_with_timeout`, 2 s) for `session_start` CCLK calls** (`cellular.c`, 0.10.0-at-timeout) — synchronous `nrf_modem_at_*` calls can block past the 60 s WDT envelope under sustained modem contention (e.g. SIM-exhausted PDN-reject loop, as observed 2026-05-11/12 conference). Wrapper dispatches to a worker that runs INSIDE the reporter thread (RAM consolidation; dedicated thread overflowed by ~2 KB). Caller gets `-ETIMEDOUT` after 2 s instead of an indefinite block; maps to `-EAGAIN` so existing FMEA 1.1 retro-stamp handles `session_start` proceeding without cellular UTC. **Reporter-thread AT calls MUST bypass the wrapper** (use `_bare` variants like `read_network_time_iso8601_bare()`) or they self-deadlock: the wrapper gives `at_request_sem`, but the reporter is the only consumer and is blocked inside the wrapper waiting for itself. The 2 s timeout saves from a true deadlock but produces spurious `at cmd timed out (modem contention?)` warnings every cycle. See coord §C11.5 / §C12.4 for full design + the bench-discovered self-deadlock that motivated the `_bare` pattern.
 
 ---
 
