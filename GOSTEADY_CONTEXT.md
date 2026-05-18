@@ -387,8 +387,9 @@ Firmware: persist `activated_at` to `/lfs/activation.bin`, exit pre-activation, 
 ### Cloud-side OPEN follow-ups (not firmware to fix, but worth knowing)
 
 - ~~`activity_reject_count` alarm subscriber (sibling to FMEA 1.1 — published metric, no alarm).~~ **DONE 2026-05-17.** Cloud-side commit `3c47f0d` (added alarm in `handler-alarms.ts`), deployed 2026-05-17 to `GoSteady-Dev-Observability`. New alarm `gosteady-dev-activity-processor-activity-reject` watches the existing EMF metric; threshold > 0 in 5 min; routes to ops topic. Catalog now at 30 Observability alarms. Captured in coord §C13.
-- Phase 2A `device-shadow-handler` Lambda (gates FMEA 2.1 firmware completion).
-- Phase 1C offline detector Lambda (`lastSeen > 2 hr`) — surfaced as gap by the conference silent-failure (cap dark for 3 days 21 hrs, no alarm fired). Coord §C11.7 has the slim-scope sketch (EventBridge scheduled rule + Lambda scans Device Registry for `active_monitoring` devices with `lastSeen > 2 h`). Currently the highest-priority cloud increment per coord §C13.4.
+- ~~Phase 2A `device-shadow-handler` Lambda (gates FMEA 2.1 firmware completion).~~ **DONE 2026-05-17.** Shipped as part of Phase 2A-DL deploy (coord §C17). IoT Topic Rule on `$aws/things/+/shadow/update/documents` filters for `reported.reset_complete`. FMEA 2.1's wake-time Shadow re-check is now cloud-side unblocked.
+- ~~1B-rev heartbeat-processor activation-ack gaps (Gap 1 stale `activated_at` skip + Gap 2 missing `provisioned → active_monitoring` transition).~~ **DONE 2026-05-17.** Surfaced at the §C18 bench test on `GS9999999998`; closed by rewrite of `_try_activation_ack` (idempotency moved from `attribute_not_exists(activated_at)` to `attribute_exists(outstandingActivationCmds.#cid)`; status transition + `firstHeartbeatAt` stamp + paired `device.first_heartbeat` audit folded into the same UpdateItem). Three-stage Option-A synthetic validation on `GS9999999998` passed all paths. Captured in coord §C19.
+- Phase 1C offline detector Lambda (`lastSeen > 2 hr`) — surfaced as gap by the conference silent-failure (cap dark for 3 days 21 hrs, no alarm fired). Coord §C11.7 has the slim-scope sketch (EventBridge scheduled rule + Lambda scans Device Registry for `active_monitoring` devices with `lastSeen > 2 h`). Currently the highest-priority cloud increment per coord §C19.9.
 
 ---
 
@@ -459,9 +460,9 @@ All commands `\n`-terminated (literal `0x0A`, no escape parsing).
 
 - **Coord doc (append-only joint log):** `~/Library/Mobile Documents/com~apple~CloudDocs/Documents/GoSteady/gosteady-portal/docs/firmware-coordination/2026-04-17-cloud-contracts.md`
   - GitHub: `https://github.com/Jabl1629/GoSteadyPortal/blob/feature/infra-scaffold/docs/firmware-coordination/2026-04-17-cloud-contracts.md`
-  - **Latest entry: §C10 (2026-05-10)** — M14.5 hardening sprint completion + dashboard period fix
+  - **Latest entry: §C19 (2026-05-17)** — 1B-rev heartbeat-processor activation-ack rewrite (closes §C18.5 Gap 1 + Gap 2)
 - **Cloud architecture:** `gosteady-portal/docs/specs/ARCHITECTURE.md` — single source of truth for cloud-side. Phase plan, Lambda inventory, MQTT contracts, threshold + alert policy.
-- **Cloud-side state (2026-05-10):** Phases 0A/0B/1A/1B/1.5/1.6 deployed. 1.7 (audit), 1C (offline detector), 2A (portal API + device-shadow-handler), 2B (portal integration), 2C (notifications), 3A/B (hosting + CI/CD) all 🔲 planned.
+- **Cloud-side state (2026-05-17):** Phases 0A-rev / 0B-rev / 1A-rev / 1B-rev / 1.5 / 1.6 / 1.7 deployed; Phase 2A split into 6 subsets — 2A-0 foundation + 2A-DL device-lifecycle deployed; 2A-RD / 2A-AA / 2A-UM / 2A-INT planned. 1C (offline detector), 2B (portal integration), 2C (notifications), 3A/B (hosting + CI/CD) all 🔲 planned. Heartbeat-processor activation-ack roundtrip is now cloud-side fully closed (§C19); next firmware-relevant cloud increment is 1C offline detector (§C11.7 sketch).
 
 ### Per-Device dashboard (M14.5 daily-watch surface)
 
