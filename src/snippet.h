@@ -156,6 +156,28 @@ int gosteady_snippet_upload_one(gosteady_snippet_publish_fn publish_fn);
 int gosteady_snippet_rotate(uint32_t stale_age_seconds,
 			    uint8_t rotate_threshold_pct);
 
+/*
+ * Purge ALL snippets from /snippets/. Deletes every .bin / .json / .up
+ * tuple unconditionally — including un-uploaded snippets (intentional;
+ * the wipe path discards patient-derived data regardless of upload
+ * state).
+ *
+ * Called by the wipe routine (src/wipe.c) when cloud issues a `wipe`
+ * cmd post-end-assignment. Skips the currently-active capture's UUID
+ * (held under s_capture_lock) defensively — though the wipe path
+ * should have already stopped any active session via session_stop
+ * before calling here.
+ *
+ * Returns the count of snippet "tuples" (.bin files) removed, or
+ * negative errno on directory iteration failure. -ENOENT-class failures
+ * on individual unlinks are non-fatal (logged + counted as zero).
+ *
+ * Added 2026-05-17 for the AA-battery-recycle design — see portal
+ * `docs/specs/2026-05-17-aa-battery-recycle.md` D4 (wipe scope) and
+ * firmware coord §C20.
+ */
+int gosteady_snippet_purge_all(void);
+
 #ifdef __cplusplus
 }
 #endif

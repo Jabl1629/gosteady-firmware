@@ -30,11 +30,25 @@
  *                    calls now return -ETIMEDOUT after 2 s when modem
  *                    is contended; session.c's FMEA 1.1 retro-stamp
  *                    handles the -EAGAIN cleanly.
+ *   0.11.0-wipe-cmd  AA-battery-recycle (portal coord §C20): new `wipe`
+ *                    downlink cmd handler in cloud.c + new src/wipe.c
+ *                    module. cmd fires from cloud-side end-assignment
+ *                    (portal `device-api` Lambda). Firmware wipes
+ *                    /lfs/activation.bin + /lfs/sessions/*.dat +
+ *                    /snippets/* with a battery_pct >= 0.10 floor.
+ *                    Acks via Shadow reported.wipe_complete + heartbeat
+ *                    last_cmd_id echo (24h cloud-side ack window per
+ *                    DL15). Replaces deprecated charger-gated reset
+ *                    (DL6 rewrite — original spec assumed rechargeable
+ *                    LiPo + on-charger sanitization; hardware shifted
+ *                    to replaceable AAs with 6-12 mo life, so the
+ *                    charger checkpoint is unavailable). See portal
+ *                    `docs/specs/2026-05-17-aa-battery-recycle.md`.
  */
 
 #ifndef GOSTEADY_VERSION_H_
 #define GOSTEADY_VERSION_H_
 
-#define GS_FIRMWARE_VERSION_STR "0.10.0-at-timeout"
+#define GS_FIRMWARE_VERSION_STR "0.11.0-wipe-cmd"
 
 #endif /* GOSTEADY_VERSION_H_ */

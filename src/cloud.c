@@ -47,6 +47,7 @@
 #include "session.h"   /* Phase 1.6 follow-up: gosteady_session_prune for auto-prune-on-PUBACK */
 #include "version.h"
 #include "activation.h"
+#include "wipe.h"      /* 2026-05-17 AA-battery-recycle: gosteady_wipe_now for wipe cmd dispatch */
 
 #include <zephyr/data/json.h>
 #include <zephyr/net/mqtt.h>
@@ -165,26 +166,28 @@ static const char *client_id(void)
 static int drain_one_snippet(void);
 #endif
 
-/* ---- M12.1e.2 activate cmd parser ----
+/* ---- gs/{serial}/cmd downlink parser ----
  *
- * Schema (locked 2026-04-17 in coord doc):
+ * Schema (activate locked 2026-04-17; wipe added 2026-05-17 per
+ * portal `docs/specs/2026-05-17-aa-battery-recycle.md` + coord §C20):
  *   {"cmd":"activate","cmd_id":"act_<uuid>","ts":"<ISO8601>","session_id":"..."}
+ *   {"cmd":"wipe",    "cmd_id":"wipe_<uuid>","ts":"<ISO8601>"}
  *
- * Zephyr json lib needs a json_obj_descr table. session_id is captured
- * but currently unused (audit-only on cloud side); kept in the parse
- * struct so we don't fail-validate on payloads that include it. */
-struct activate_cmd_json {
+ * Same struct/descr drives both — activate has the optional
+ * session_id (audit-only on cloud side), wipe doesn't populate it.
+ * session_id is unused by firmware regardless. */
+struct app_cmd_json {
 	const char *cmd;
 	const char *cmd_id;
 	const char *ts;
 	const char *session_id;
 };
 
-static const struct json_obj_descr activate_cmd_descr[] = {
-	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, cmd,        JSON_TOK_STRING),
-	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, cmd_id,     JSON_TOK_STRING),
-	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, ts,         JSON_TOK_STRING),
-	JSON_OBJ_DESCR_PRIM(struct activate_cmd_json, session_id, JSON_TOK_STRING),
+static const struct json_obj_descr app_cmd_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct app_cmd_json, cmd,        JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct app_cmd_json, cmd_id,     JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct app_cmd_json, ts,         JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct app_cmd_json, session_id, JSON_TOK_STRING),
 };
 
 /* Best-effort write of state.reported.activated_at as the device-side
@@ -227,7 +230,7 @@ static int write_reported_activated_at(const char *iso)
  * activate as authoritative — cloud is canonical issuance authority,
  * firmware shouldn't second-guess.
  */
-static void handle_activate_cmd(const struct activate_cmd_json *c)
+static void handle_activate_cmd(const struct app_cmd_json *c)
 {
 	if (!c->cmd_id || !c->ts) {
 		LOG_ERR("activate cmd missing required fields (cmd_id=%p ts=%p) — ignored",
@@ -246,9 +249,59 @@ static void handle_activate_cmd(const struct activate_cmd_json *c)
 	(void)write_reported_activated_at(c->ts);
 }
 
-/* Dispatch an inbound app-specific topic message. We only handle the
- * `activate` cmd today; future cmds (e.g., remote-stop, snippet-arm)
- * land here too. */
+/* Handle an inbound `wipe` cmd (added 2026-05-17 — see wipe.h for
+ * the contract and `docs/specs/2026-05-17-aa-battery-recycle.md` for
+ * the design rationale).
+ *
+ *  - Delegates the whole wipe routine to gosteady_wipe_now (wipe.c).
+ *  - That function handles: battery floor check, session stop,
+ *    activation clear, session .dat purge, snippet purge, last_cmd_id
+ *    echo plumbing, and Shadow reported.wipe_complete ack write.
+ *  - This dispatcher just parses the cmd + logs + calls.
+ *
+ * Cloud ack-matching: gosteady_wipe_now sets s_last_cmd_id to the
+ * wipe_id, so the next heartbeat carries the echo. Cloud's
+ * heartbeat-processor matches the echo against its
+ * outstandingWipeCmds map (24h window, per DL15) and transitions
+ * Device Registry status discontinued → ready_to_provision.
+ */
+static void handle_wipe_cmd(const struct app_cmd_json *c)
+{
+	if (!c->cmd_id || !c->ts) {
+		LOG_ERR("wipe cmd missing required fields (cmd_id=%p ts=%p) — ignored",
+			c->cmd_id, c->ts);
+		return;
+	}
+	LOG_INF("wipe cmd received: cmd_id=%s ts=%s", c->cmd_id, c->ts);
+
+	int ret = gosteady_wipe_now(c->cmd_id);
+	if (ret == -EAGAIN) {
+		LOG_WRN("wipe deferred (%d) — cloud will retry on next heartbeat or after operator action (battery swap)",
+			ret);
+		/* Do NOT echo cmd_id — leaving it in s_last_cmd_id would
+		 * make cloud think the wipe completed. The cmd stays in
+		 * cloud's outstandingWipeCmds map and is re-published or
+		 * re-matched on the next firmware connection. */
+		return;
+	}
+	if (ret < 0) {
+		LOG_ERR("wipe_now failed (%d) — cmd_id NOT acked via Shadow; heartbeat last_cmd_id still echoes for cloud-side retry",
+			ret);
+		/* The wipe partially completed (activation/session/snippet
+		 * purges are best-effort and proceeded even on partial
+		 * failure per wipe.c logic). s_last_cmd_id was already
+		 * updated by gosteady_wipe_now before the Shadow ack
+		 * attempt, so the heartbeat echo path is still armed —
+		 * cloud will still see the ack via that channel. */
+		return;
+	}
+	LOG_INF("wipe applied: cmd_id=%s — device entering pre-activation state",
+		c->cmd_id);
+}
+
+/* Dispatch an inbound app-specific topic message. Handles `activate`
+ * (M12.1e.2) and `wipe` (2026-05-17 AA-recycle); future cmds land here
+ * too. */
 static void dispatch_app_message(const struct aws_iot_data *msg)
 {
 	if (!msg || !msg->ptr || msg->len == 0) { return; }
@@ -257,9 +310,9 @@ static void dispatch_app_message(const struct aws_iot_data *msg)
 		(unsigned)msg->len,
 		(int)msg->len, msg->ptr);
 
-	struct activate_cmd_json parsed = { 0 };
+	struct app_cmd_json parsed = { 0 };
 	int rc = json_obj_parse((char *)msg->ptr, msg->len,
-				 activate_cmd_descr, ARRAY_SIZE(activate_cmd_descr),
+				 app_cmd_descr, ARRAY_SIZE(app_cmd_descr),
 				 &parsed);
 	if (rc < 0) {
 		LOG_ERR("app msg JSON parse failed: %d", rc);
@@ -271,6 +324,8 @@ static void dispatch_app_message(const struct aws_iot_data *msg)
 	}
 	if (strcmp(parsed.cmd, "activate") == 0) {
 		handle_activate_cmd(&parsed);
+	} else if (strcmp(parsed.cmd, "wipe") == 0) {
+		handle_wipe_cmd(&parsed);
 	} else {
 		LOG_WRN("unknown cmd '%s' — ignored (forward-compat)", parsed.cmd);
 	}

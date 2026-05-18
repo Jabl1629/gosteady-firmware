@@ -361,6 +361,69 @@ int gosteady_snippet_rotate(uint32_t stale_age_seconds,
 	return s + f;
 }
 
+/* Iterate /snippets, fs_unlink every .bin tuple (.bin + .json + .up).
+ * Defensively skips the currently-active capture's UUID — though the
+ * AA-recycle wipe path stops any active session before calling here,
+ * so in practice no capture is active. */
+int gosteady_snippet_purge_all(void)
+{
+	if (!atomic_get(&s_initialized)) {
+		LOG_WRN("purge_all: snippet module not initialized — nothing to do");
+		return 0;
+	}
+	char active_uuid[40];
+	(void)snapshot_active_uuid(active_uuid, sizeof(active_uuid));
+
+	struct fs_dir_t dir;
+	fs_dir_t_init(&dir);
+	int ret = fs_opendir(&dir, SNIPPET_MNT);
+	if (ret < 0) {
+		LOG_ERR("purge_all: fs_opendir(%s) failed (%d)",
+			SNIPPET_MNT, ret);
+		return ret;
+	}
+
+	int deleted = 0;
+	struct fs_dirent ent;
+	while (1) {
+		int rc = fs_readdir(&dir, &ent);
+		if (rc < 0) {
+			LOG_WRN("purge_all: fs_readdir failed (%d) — partial purge",
+				rc);
+			break;
+		}
+		if (ent.name[0] == '\0') { break; }
+
+		/* Only .bin entries drive the per-tuple unlink; .json + .up
+		 * are handled by delete_snippet_files for each UUID. */
+		size_t nlen = strlen(ent.name);
+		if (nlen <= 4 || strcmp(ent.name + nlen - 4, ".bin") != 0) {
+			continue;
+		}
+		char uuid[40];
+		size_t ulen = nlen - 4;
+		if (ulen >= sizeof(uuid)) { continue; }
+		memcpy(uuid, ent.name, ulen);
+		uuid[ulen] = '\0';
+
+		if (active_uuid[0] != '\0' && strcmp(uuid, active_uuid) == 0) {
+			LOG_WRN("purge_all: skipping active capture %s — caller should have stopped session",
+				uuid);
+			continue;
+		}
+
+		(void)delete_snippet_files(uuid);
+		deleted++;
+	}
+	(void)fs_closedir(&dir);
+	if (deleted > 0) {
+		LOG_INF("purge_all: deleted %d snippet tuple(s)", deleted);
+	} else {
+		LOG_DBG("purge_all: no snippets to purge");
+	}
+	return deleted;
+}
+
 int gosteady_snippet_init(void)
 {
 	if (atomic_set(&s_initialized, 1) == 1) {
