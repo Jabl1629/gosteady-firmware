@@ -167,6 +167,25 @@ config GOSTEADY_LOW_POWER
 	  margin, so they stay out until the bench discharge measurement shows
 	  they're needed and they can be validated against capture in isolation.
 
+config GOSTEADY_SESSION_LED
+	bool "Green session LED during recording (even in FIELD_MODE)"
+	default n
+	help
+	  When set, led_set_recording() lights the green LED solid for the
+	  duration of an active capture session and extinguishes it when the
+	  session ends — even under CONFIG_GOSTEADY_FIELD_MODE, which otherwise
+	  runs the device dark (M10.5 "no LEDs in normal operation").
+
+	  Deliberate pilot override: gives the operator a visual confirmation
+	  that the cap detected motion and is recording, while the device still
+	  stays dark at rest. The idle purple blink is gated separately on
+	  !FIELD_MODE in the main loop, so it remains off — only the green
+	  session LED is re-enabled by this flag.
+
+	  Cost: green LED on during sessions only (~40 min/day typical) — on the
+	  order of tens of mAh/month, affordable within the pilot battery budget.
+	  Set in prj_pilot.conf.
+
 config GOSTEADY_FORENSICS_ENABLE
 	bool "Enable crash forensics + watchdog (M10.7.3)"
 	default n

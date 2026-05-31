@@ -68,6 +68,12 @@
  *                    CONFIG_GOSTEADY_LOW_POWER is set — non-pilot builds
  *                    keep reporting 0.12.0-psm so cloud attribution stays
  *                    accurate per build.
+ *   0.13.1-pilot     Pilot LED refinement (CONFIG_GOSTEADY_SESSION_LED): the
+ *                    green session LED is re-enabled during recording even in
+ *                    FIELD_MODE, so the operator gets a "motion detected /
+ *                    recording" confirmation, while the device stays dark at
+ *                    rest (idle purple blink still off). 0.13.0-pilot had
+ *                    silenced ALL LEDs; this restores just the green one.
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -79,7 +85,7 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_LOW_POWER)
-#define GS_FIRMWARE_VERSION_STR "0.13.0-pilot"
+#define GS_FIRMWARE_VERSION_STR "0.13.1-pilot"
 #else
 #define GS_FIRMWARE_VERSION_STR "0.12.0-psm"
 #endif

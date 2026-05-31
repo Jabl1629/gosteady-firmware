@@ -170,12 +170,15 @@ static int configure_led(const struct gpio_dt_spec *led, const char *name)
  * caller handles the purple blink via toggles in the main loop. */
 static void led_set_recording(bool recording)
 {
-	/* Phase 5: deployment-mode firmware shows no LEDs in normal
-	 * operation per the M10.5 anti-features list. Only the M12.1e
-	 * pre-activation blue LED is allowed. Skip the recording LED
-	 * entirely in field builds — the chip stays dark while
-	 * sessions auto-capture. */
-	if (IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
+	/* Phase 5: deployment-mode firmware runs dark in normal operation per
+	 * the M10.5 anti-features list — EXCEPT the green session LED when
+	 * CONFIG_GOSTEADY_SESSION_LED is set (battery pilot). That gives the
+	 * operator a visual "motion detected / recording" confirmation while
+	 * the device still stays dark at rest: the idle purple blink is gated
+	 * separately on !FIELD_MODE in the main loop, so it remains off here.
+	 * Without SESSION_LED, field builds skip the recording LED entirely. */
+	if (IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE) &&
+	    !IS_ENABLED(CONFIG_GOSTEADY_SESSION_LED)) {
 		return;
 	}
 	if (recording) {
