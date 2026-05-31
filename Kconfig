@@ -141,6 +141,32 @@ config GOSTEADY_FORENSICS_STRESS
 	  (per the M10.5 risk table) and again on each shipping unit during
 	  bring-up. Off by default.
 
+config GOSTEADY_LOW_POWER
+	bool "Pilot battery-optimization bundle"
+	default n
+	help
+	  Bundles the low-risk firmware power optimizations for the battery
+	  pilot (1350 mAh AA-class cell, 30-day target). Enabled via
+	  prj_pilot.conf layered on top of prj_field.conf. Currently gates:
+
+	    - Fuel-gauge worker cadence relaxed 5 s -> 60 s (battery.c), and the
+	      nPM1300 AVG_CURRENT surfaced on uart0 every tick so a bench
+	      operator can watch per-state draw (PSM idle vs heartbeat-connect
+	      spike) without a PPK2.
+	    - Cellular signal/time reporter poll relaxed 60 s -> 30 min
+	      (cellular.c) so the modem can stay in PSM sleep between the hourly
+	      heartbeats instead of being poked every minute.
+
+	  PSM itself (CONFIG_LTE_PSM_REQ, 0.12.0) and snippet-disable
+	  (CONFIG_GOSTEADY_SNIPPET_ENABLE=n) are set directly in the
+	  cloud/field and pilot overlays respectively — not gated by this flag.
+
+	  Deliberately NOT bundled here yet: idle-sampler gating and BMI270
+	  gyro-disable. Both touch the session-capture hot path; the
+	  PSM + snippet-off + this bundle already clears the 30-day target with
+	  margin, so they stay out until the bench discharge measurement shows
+	  they're needed and they can be validated against capture in isolation.
+
 config GOSTEADY_FORENSICS_ENABLE
 	bool "Enable crash forensics + watchdog (M10.7.3)"
 	default n

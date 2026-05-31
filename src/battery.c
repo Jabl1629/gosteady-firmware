@@ -55,8 +55,17 @@ static const struct device *const s_charger = DEVICE_DT_GET(BATTERY_NODE);
 /* Update cadence. The fuel gauge lib accepts arbitrary `delta` between calls;
  * 5 s gives reasonable SoC tracking without hammering the I²C bus. The
  * heartbeat publishes hourly post-M12.1c.2, so we get ~720 fuel-gauge ticks
- * between heartbeats — plenty of resolution. */
+ * between heartbeats — plenty of resolution.
+ *
+ * Pilot low-power (CONFIG_GOSTEADY_LOW_POWER): relax to 60 s. The lib still
+ * accepts the larger delta; coarser ticks just mean ~12x fewer I²C + CPU
+ * wakeups between heartbeats, and 60 s SoC resolution is ample for a slow
+ * AA-class discharge. */
+#if defined(CONFIG_GOSTEADY_LOW_POWER)
+#define UPDATE_PERIOD K_SECONDS(60)
+#else
 #define UPDATE_PERIOD K_SECONDS(5)
+#endif
 
 static atomic_t s_initialized = ATOMIC_INIT(0);
 static atomic_t s_first_reading_landed = ATOMIC_INIT(0);
@@ -66,6 +75,12 @@ static atomic_t s_first_reading_landed = ATOMIC_INIT(0);
 static K_MUTEX_DEFINE(s_lock);
 static uint16_t s_cached_mv = 0;
 static float    s_cached_pct = 0.5f;  /* placeholder until first real reading */
+/* Pilot battery instrumentation (CONFIG_GOSTEADY_LOW_POWER): last nPM1300
+ * AVG_CURRENT (signed amps; Zephyr convention -=discharge) + vbus state,
+ * surfaced on uart0 by the worker so per-state draw is observable without a
+ * PPK2. Cached here just to carry the value out of the locked update. */
+static float    s_cached_current_a = 0.0f;
+static bool     s_cached_vbus = false;
 
 static int64_t  s_ref_time;
 static int32_t  s_chg_status_prev;
@@ -219,6 +234,8 @@ static int fuel_gauge_update_locked(void)
 
 	s_cached_mv  = (uint16_t)(voltage * 1000.0f + 0.5f);
 	s_cached_pct = soc / 100.0f;
+	s_cached_current_a = current;
+	s_cached_vbus = vbus;
 
 	atomic_set(&s_first_reading_landed, 1);
 	return 0;
@@ -233,13 +250,30 @@ static void worker_thread_fn(void *p1, void *p2, void *p3)
 		int ret = fuel_gauge_update_locked();
 		uint16_t mv  = s_cached_mv;
 		float    pct = s_cached_pct;
+		float    cur_a = s_cached_current_a;
+		bool     vbus = s_cached_vbus;
 		k_mutex_unlock(&s_lock);
 
 		if (ret < 0) {
 			LOG_WRN("fuel-gauge update failed (%d)", ret);
 		} else {
+#if defined(CONFIG_GOSTEADY_LOW_POWER)
+			/* Pilot battery instrument: surface the actual cell
+			 * current so the PSM idle floor vs heartbeat-connect
+			 * spike is visible on uart0. Sign per Zephyr gauge
+			 * convention: negative = discharging from the cell,
+			 * positive = charging into it. NOTE: while USB is
+			 * attached (vbus=1) this reflects the charge/USB split,
+			 * NOT pure discharge — for a true average-current
+			 * number run on battery (vbus=0) and read the SoC slope
+			 * across heartbeats. */
+			LOG_INF("battery: %u mV, SoC %.1f%%, I=%d uA (vbus=%d)",
+				(unsigned)mv, (double)(pct * 100.0f),
+				(int)(cur_a * 1e6f), (int)vbus);
+#else
 			LOG_DBG("battery: %u mV, SoC %.1f%%",
 				(unsigned)mv, (double)(pct * 100.0f));
+#endif
 		}
 		k_sleep(UPDATE_PERIOD);
 	}

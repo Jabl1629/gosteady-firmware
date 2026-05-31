@@ -44,11 +44,44 @@
  *                    to replaceable AAs with 6-12 mo life, so the
  *                    charger checkpoint is unavailable). See portal
  *                    `docs/specs/2026-05-17-aa-battery-recycle.md`.
+ *   0.12.0-psm       Battery pilot: request LTE-M Power Saving Mode at
+ *                    attach (CONFIG_LTE_PSM_REQ=y, RPTAU=3 h, RAT=2 s in
+ *                    prj_cloud.conf + prj_field.conf). Prior builds left
+ *                    PSM unrequested, so the modem idled in registered
+ *                    I-DRX (~mA) 24/7 between hourly heartbeats — the
+ *                    dominant overrun against the 1350 mAh / 30-day pilot
+ *                    budget. PSM lets the modem deep-sleep (~µA) between
+ *                    app-initiated wakes. Downlink (activate/wipe) latency
+ *                    unchanged: cmds still land at the next connect via the
+ *                    cloud connection-coordinator (coord §C24). First of a
+ *                    staged battery-optimization set; snippet/sampler/
+ *                    reporter changes land separately so PSM's effect can
+ *                    be isolated in the bench model.
+ *   0.13.0-pilot     Battery-pilot overlay (prj_pilot.conf on top of
+ *                    prj_field.conf): snippets OFF (no 84 KB opportunistic
+ *                    uploads) + CONFIG_GOSTEADY_LOW_POWER bundle (fuel-gauge
+ *                    cadence 5 s->60 s + nPM1300 current logged on uart0;
+ *                    cellular reporter poll 60 s->30 min). FIELD_MODE (from
+ *                    prj_field.conf) also silences the idle purple-blink +
+ *                    recording LEDs. Idle-sampler gating + gyro-disable are
+ *                    deferred (session-capture hot path). Reported only when
+ *                    CONFIG_GOSTEADY_LOW_POWER is set — non-pilot builds
+ *                    keep reporting 0.12.0-psm so cloud attribution stays
+ *                    accurate per build.
  */
 
 #ifndef GOSTEADY_VERSION_H_
 #define GOSTEADY_VERSION_H_
 
-#define GS_FIRMWARE_VERSION_STR "0.11.0-wipe-cmd"
+/* Single source of truth, but the pilot overlay is a distinct runtime
+ * behavior the cloud/portal team must be able to attribute — so the string
+ * tracks CONFIG_GOSTEADY_LOW_POWER at compile time. CONFIG_* macros are
+ * always visible via Zephyr's globally-injected autoconf.h, so this resolves
+ * to a plain compile-time literal usable in static initializers. */
+#if defined(CONFIG_GOSTEADY_LOW_POWER)
+#define GS_FIRMWARE_VERSION_STR "0.13.0-pilot"
+#else
+#define GS_FIRMWARE_VERSION_STR "0.12.0-psm"
+#endif
 
 #endif /* GOSTEADY_VERSION_H_ */

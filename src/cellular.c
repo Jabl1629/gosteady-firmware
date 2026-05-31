@@ -47,8 +47,20 @@ static volatile int8_t  s_snr_db   = INT8_MIN;
 static volatile bool    s_signal_valid;
 
 /* Reporter thread cadence: poll once at registration and every 60 s
- * thereafter. Keeps the bring-up log informative without flooding. */
+ * thereafter. Keeps the bring-up log informative without flooding.
+ *
+ * Pilot low-power (CONFIG_GOSTEADY_LOW_POWER): relax to 30 min. The 60 s
+ * poll is bench diagnostics that also wakes the app core (and pokes the
+ * modem AT interface) every minute, which works against PSM sleep between
+ * the hourly heartbeats. The heartbeat publishes the last cached RSRP/SNR,
+ * which for a (stationary) fielded cap is fine at 30-min freshness — the
+ * first post-registration poll still primes a valid reading before the
+ * first heartbeat. */
+#if defined(CONFIG_GOSTEADY_LOW_POWER)
+#define REPORTER_PERIOD_MS  (30 * 60 * 1000)
+#else
 #define REPORTER_PERIOD_MS  (60 * 1000)
+#endif
 
 K_THREAD_STACK_DEFINE(reporter_stack, 2048);
 static struct k_thread reporter_thread;
