@@ -191,33 +191,6 @@ static void led_set_recording(bool recording)
 	}
 }
 
-#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-/* Pre-activation "pick me up to set up" indicator
- * (docs/specs/preactivation-lowpower-mode.md §4): a brief blue flash burst,
- * rate-limited so sustained handling doesn't strobe. Cheap — the LED is on
- * only during the flashes; the modem + sampler stay asleep. Driven from the
- * auto-start thread on a pre-activation motion event. */
-#define BLUE_BLINK_COUNT      2
-#define BLUE_BLINK_ON_MS      80
-#define BLUE_BLINK_OFF_MS     120
-#define BLUE_BLINK_MIN_GAP_MS 3000
-static void blue_blink_burst(void)
-{
-	static uint32_t last_blink_ms;
-	uint32_t now = k_uptime_get_32();
-	if (last_blink_ms != 0 && (now - last_blink_ms) < BLUE_BLINK_MIN_GAP_MS) {
-		return;  /* rate-limit: skip if a burst fired within the gap */
-	}
-	last_blink_ms = now;
-	for (int i = 0; i < BLUE_BLINK_COUNT; i++) {
-		(void)gpio_pin_set_dt(&led_blue, 1);
-		k_msleep(BLUE_BLINK_ON_MS);
-		(void)gpio_pin_set_dt(&led_blue, 0);
-		k_msleep(BLUE_BLINK_OFF_MS);
-	}
-}
-#endif
-
 /* ---- LittleFS + boot counter (M3 regression check) ---- */
 
 static int mount_lfs_and_bump_boot_count(void)
@@ -605,10 +578,11 @@ static void preact_green_confirm(void)
  * safety-net heartbeat re-enables it. */
 static void run_preact_wake_window(void)
 {
-	/* Backed off (likely transit/storage, not onboarding): just acknowledge
-	 * the shake with a blue blink — no connect, no window. */
+	/* Backed off (likely transit/storage, not onboarding): stay DARK on
+	 * motion — no blink, no connect — until the daily safety-net heartbeat
+	 * re-enables windows. (A cap in a shipping box shouldn't light up on
+	 * every bump.) */
 	if (gosteady_cloud_preact_is_backed_off()) {
-		blue_blink_burst();
 		(void)k_sem_reset(&motion_event_sem);
 		return;
 	}
@@ -628,13 +602,18 @@ static void run_preact_wake_window(void)
 		if (now >= motionless_deadline || now >= hard_deadline) {
 			break;
 		}
-		/* blue pulse ~1 Hz */
+		/* Steady ~1 Hz blue pulse, INDEPENDENT of motion. (The cadence used
+		 * to ride on the motion-reset wait, so shaking shortcut the gap and
+		 * produced erratic extra blinks — the "2 quick blinks on motion" UX
+		 * bug.) Fixed 100 ms on / 900 ms off. */
 		(void)gpio_pin_set_dt(&led_blue, 1);
 		k_msleep(PREACT_PULSE_ON_MS);
 		(void)gpio_pin_set_dt(&led_blue, 0);
-		/* wait the rest of the ~1 s, waking early on new motion to reset the
-		 * motionless timer (the hard cap is never extended). */
-		if (k_sem_take(&motion_event_sem, K_MSEC(PREACT_PULSE_GAP_MS)) == 0) {
+		k_msleep(PREACT_PULSE_GAP_MS);
+		/* Reset the motionless timer if ANY motion happened during the pulse
+		 * (non-blocking — does not perturb the pulse cadence). motion_event_sem
+		 * coalesces multiple events to one, which is all we need here. */
+		if (k_sem_take(&motion_event_sem, K_NO_WAIT) == 0) {
 			motionless_deadline = k_uptime_get() + window_ms;
 		}
 	}

@@ -100,6 +100,12 @@
  *                    until the daily safety-net heartbeat. Gives the user a
  *                    clear interactive "shake to set up" window instead of a
  *                    one-shot connect that could miss a just-after claim.
+ *   0.15.1-wakewindow UX fix: the blue pulse cadence rode on the motion-reset
+ *                    wait, so shaking shortcut the gap and produced erratic
+ *                    extra blinks ("2 quick blinks on motion"). Pulse is now a
+ *                    fixed 100/900 ms 1 Hz independent of motion (motion checked
+ *                    non-blocking). Removed the legacy blue_blink_burst (2-flash
+ *                    burst) entirely; a backed-off cap now stays dark on motion.
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -111,7 +117,7 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.15.0-wakewindow"
+#define GS_FIRMWARE_VERSION_STR "0.15.1-wakewindow"
 #elif defined(CONFIG_GOSTEADY_LOW_POWER)
 #define GS_FIRMWARE_VERSION_STR "0.13.1-pilot"
 #else
