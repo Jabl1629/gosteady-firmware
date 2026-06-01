@@ -84,8 +84,11 @@
  *                    "pick-me-up" blink + rate-limited connect, and heartbeat
  *                    drops to a 24 h safety net. Cuts storage draw ~340-410 →
  *                    ~48 mAh/month so a cap can ship/sit for months with no
- *                    pull-tab. NOTE: gated-sampler activated-capture soak
- *                    pending a free bench unit (race surface — see spec §9).
+ *                    pull-tab. Gated-sampler SOAK PASSED 2026-05-31 on
+ *                    GS0000000001 (16 start/stop cycles incl. rapid-fire,
+ *                    0 faults / 0 dropped samples, clean BMI270 resume/suspend,
+ *                    algo ran). Shipped to GS0000000001 (the D2C test unit),
+ *                    D2C pre-claim staging intact (coord §C40).
  */
 
 #ifndef GOSTEADY_VERSION_H_

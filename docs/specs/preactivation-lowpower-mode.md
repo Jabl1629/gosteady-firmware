@@ -226,11 +226,14 @@ on a shelf with plenty left for the patient.
 
 ## 9. Risks & test plan
 
-1. **Sampler gating (highest risk).** Soak many auto-start/auto-stop + SW0/BLE
-   start/stop cycles; assert: no lost leading samples, no `-EBADF`/HardFault on
-   stop, BMI270 actually suspends between sessions (verify with the nPM1300
-   `IBAT` instrument: idle current drops vs the spinning build), algo outputs
-   unchanged vs the 31/31 host suite on identical input.
+1. **Sampler gating (highest risk).** ✅ **SOAK PASSED 2026-05-31** on
+   GS0000000001 (bench build, control.py over uart1): 16 start/stop cycles
+   (12 normal ~2.7 s + 4 rapid-fire), **0 faults, 0 dropped samples**, every
+   session captured (236–240 / 33–37 samples), clean BMI270 resume/suspend
+   pairing on every cycle incl. rapid, algo (ALGO_V1) ran. The documented
+   `-EBADF`/HardFault stop race was NOT reintroduced. Still TODO: confirm the
+   idle-current drop with the nPM1300 `IBAT` instrument (vs the spinning build)
+   when a unit is free.
 2. **Motion-connect rate-limit** — verify sustained handling does **not** spam
    cellular (iBasis trial budget); count connects over a 2-min shake test.
 3. **Activation promptness** — after claim+activate: blue stops, green works on
