@@ -92,6 +92,31 @@ static struct mqtt_topic s_app_topics[1];
 #define HEARTBEAT_RETRY_3RD   K_SECONDS(60 * 15)
 #define HEARTBEAT_MAX_ATTEMPTS 3
 
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+/* Pre-activation cadence (docs/specs/preactivation-lowpower-mode.md §5): a long
+ * safety-net interval, interruptible by a motion-triggered connect so the
+ * device collects its `activate` cmd promptly when the user handles the cap
+ * instead of waiting out the full interval. Switches to HEARTBEAT_INTERVAL
+ * once activated. */
+#define PREACT_HEARTBEAT_INTERVAL \
+	K_SECONDS(CONFIG_GOSTEADY_PREACT_HEARTBEAT_HOURS * 3600)
+#define PREACT_MOTION_CONNECT_MIN_MS \
+	(CONFIG_GOSTEADY_PREACT_MOTION_CONNECT_MIN_S * 1000)
+static K_SEM_DEFINE(preact_connect_sem, 0, 1);
+
+void gosteady_cloud_request_preact_connect(void)
+{
+	static uint32_t last_req_ms;
+	uint32_t now = k_uptime_get_32();
+	if (last_req_ms != 0 &&
+	    (now - last_req_ms) < (uint32_t)PREACT_MOTION_CONNECT_MIN_MS) {
+		return;  /* rate-limit cellular wakeups under sustained handling */
+	}
+	last_req_ms = now;
+	k_sem_give(&preact_connect_sem);
+}
+#endif
+
 /* Wait windows. aws_iot_connect is documented as "synchronous and only returns
  * success when the client has connected" but in practice the CONNECTED event
  * is delivered to our handler asynchronously after CONNACK. Sem-based wait
@@ -854,7 +879,22 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 			LOG_ERR("heartbeat tick #%d FAILED after %d attempts (%d) — waiting for next interval",
 				iter - 1, HEARTBEAT_MAX_ATTEMPTS, rc);
 		}
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+		/* Cadence: activated → hourly; pre-activation → long safety net,
+		 * but wake early on a motion-triggered connect request so a pending
+		 * `activate` cmd is collected when the user handles the cap. The
+		 * sem-take returns 0 on a motion request and -EAGAIN on the
+		 * safety-net timeout — either way we loop and publish (which
+		 * collects the cmd in the post-PUBACK linger).
+		 * See docs/specs/preactivation-lowpower-mode.md §5. */
+		if (gosteady_activation_is_activated()) {
+			k_sleep(HEARTBEAT_INTERVAL);
+		} else {
+			(void)k_sem_take(&preact_connect_sem, PREACT_HEARTBEAT_INTERVAL);
+		}
+#else
 		k_sleep(HEARTBEAT_INTERVAL);
+#endif
 	}
 }
 

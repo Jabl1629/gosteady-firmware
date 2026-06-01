@@ -71,6 +71,14 @@ static struct k_poll_signal start_signal = K_POLL_SIGNAL_INITIALIZER(start_signa
 static K_SEM_DEFINE(stop_done_sem,  0, 1);
 static K_SEM_DEFINE(start_done_sem, 0, 1);
 
+/* Gated-sampler wake signal (docs/specs/preactivation-lowpower-mode.md §3).
+ * Given by gosteady_session_start() AFTER s_active=true so the sampler thread
+ * — which blocks in gosteady_session_wait_for_start() when idle — wakes with
+ * the session already open. Independent of the writer's start_signal /
+ * start_done_sem handshake above (that resets the writer's batch; this just
+ * un-parks the sampler). */
+static K_SEM_DEFINE(sampler_start_sem, 0, 1);
+
 /* Writer thread stack + thread object. */
 /* Writer stack bumped 3072 → 4096 with M12.1f. The snippet_capture_append
  * hook from the per-sample drain loop adds another fs_write call into
@@ -525,7 +533,17 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 		s_session_start_utc_iso[0] ? s_session_start_utc_iso : "",
 		(uint64_t)s_session_start_uptime_ms);
 #endif
+
+	/* Wake the gated sampler last — after s_active=true, the writer
+	 * start-handshake, file open, and snippet arm — so its very first
+	 * capture iteration sees a fully-open session. */
+	k_sem_give(&sampler_start_sem);
 	return 0;
+}
+
+void gosteady_session_wait_for_start(void)
+{
+	(void)k_sem_take(&sampler_start_sem, K_FOREVER);
 }
 
 int gosteady_session_append(const struct gosteady_sample *s)

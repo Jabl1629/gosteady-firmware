@@ -186,6 +186,49 @@ config GOSTEADY_SESSION_LED
 	  order of tens of mAh/month, affordable within the pilot battery budget.
 	  Set in prj_pilot.conf.
 
+config GOSTEADY_PREACT_LOWPOWER
+	bool "Pre-activation low-power (shipping) mode"
+	depends on GOSTEADY_CLOUD_ENABLE
+	default n
+	help
+	  Shipping/storage behaviors for a device that hasn't been activated
+	  yet (no pull-tab; may sit in a box for months). Full design:
+	  docs/specs/preactivation-lowpower-mode.md.
+
+	  When set, in pre-activation (gosteady_activation_is_activated() false):
+	    - Motion → a brief BLUE "pick me up to set up" blink (auto-start
+	      coordinator), skipping the BMI270 confirmation (no session can open).
+	    - Motion → a rate-limited cellular connect so a pending `activate`
+	      cmd is collected promptly when the cap is handled.
+	    - Heartbeat drops to a long safety-net cadence
+	      (GOSTEADY_PREACT_HEARTBEAT_HOURS) instead of hourly.
+
+	  Independent of the gated sampler, which is unconditional (it blocks
+	  when idle in all builds). Estimated storage draw ~48 mAh/month vs
+	  ~340-410 today (spec §7). Cloud-coordination note: a future offline
+	  detector must scope to active_monitoring devices (spec §11).
+
+	  Set in prj_pilot.conf.
+
+config GOSTEADY_PREACT_HEARTBEAT_HOURS
+	int "Pre-activation safety-net heartbeat cadence (hours)"
+	depends on GOSTEADY_PREACT_LOWPOWER
+	default 24
+	help
+	  How often a pre-activation device heartbeats with no motion. The
+	  cloud still sees it alive and a queued activate cmd lands within this
+	  window even if the cap is never handled. Motion triggers an earlier
+	  connect (see GOSTEADY_PREACT_MOTION_CONNECT_MIN_S).
+
+config GOSTEADY_PREACT_MOTION_CONNECT_MIN_S
+	int "Minimum seconds between motion-triggered pre-activation connects"
+	depends on GOSTEADY_PREACT_LOWPOWER
+	default 900
+	help
+	  Rate-limit on motion-triggered cellular connects in pre-activation so
+	  sustained handling doesn't spam the radio / SIM data. The blue blink
+	  still fires on every motion (cheap); only the connect is throttled.
+
 config GOSTEADY_FORENSICS_ENABLE
 	bool "Enable crash forensics + watchdog (M10.7.3)"
 	default n

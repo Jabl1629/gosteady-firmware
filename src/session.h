@@ -199,6 +199,15 @@ int gosteady_session_stop(uint32_t *out_sample_count);
 /* True if a session is currently open and accepting samples. */
 bool gosteady_session_is_active(void);
 
+/* Gated-sampler primitive (docs/specs/preactivation-lowpower-mode.md §3).
+ * Blocks the calling thread until gosteady_session_start() opens a session
+ * (the start signal is given AFTER s_active=true, so on return the session
+ * is fully open). Lets the 100 Hz sampler thread sleep — app core idle —
+ * between sessions instead of spinning, the single largest idle-power term.
+ * The caller captures while gosteady_session_is_active() is true, then loops
+ * back here. */
+void gosteady_session_wait_for_start(void);
+
 /* Phase 3 auto-stop input: count of consecutive non-motion samples
  * the writer thread has seen since the last motion-gate-active sample.
  * Updated per-sample in the writer thread; read from the main thread's

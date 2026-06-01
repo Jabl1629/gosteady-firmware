@@ -191,6 +191,33 @@ static void led_set_recording(bool recording)
 	}
 }
 
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+/* Pre-activation "pick me up to set up" indicator
+ * (docs/specs/preactivation-lowpower-mode.md §4): a brief blue flash burst,
+ * rate-limited so sustained handling doesn't strobe. Cheap — the LED is on
+ * only during the flashes; the modem + sampler stay asleep. Driven from the
+ * auto-start thread on a pre-activation motion event. */
+#define BLUE_BLINK_COUNT      2
+#define BLUE_BLINK_ON_MS      80
+#define BLUE_BLINK_OFF_MS     120
+#define BLUE_BLINK_MIN_GAP_MS 3000
+static void blue_blink_burst(void)
+{
+	static uint32_t last_blink_ms;
+	uint32_t now = k_uptime_get_32();
+	if (last_blink_ms != 0 && (now - last_blink_ms) < BLUE_BLINK_MIN_GAP_MS) {
+		return;  /* rate-limit: skip if a burst fired within the gap */
+	}
+	last_blink_ms = now;
+	for (int i = 0; i < BLUE_BLINK_COUNT; i++) {
+		(void)gpio_pin_set_dt(&led_blue, 1);
+		k_msleep(BLUE_BLINK_ON_MS);
+		(void)gpio_pin_set_dt(&led_blue, 0);
+		k_msleep(BLUE_BLINK_OFF_MS);
+	}
+}
+#endif
+
 /* ---- LittleFS + boot counter (M3 regression check) ---- */
 
 static int mount_lfs_and_bump_boot_count(void)
@@ -382,7 +409,27 @@ static void sampler_entry(void *p1, void *p2, void *p3)
 	while (1) {
 		bool active = gosteady_session_is_active();
 
-		if (active && !was_active) {
+		if (!active) {
+			/* Gated sampler (docs/specs/preactivation-lowpower-mode.md
+			 * §3): on the active→idle edge, suspend the BMI270 (the
+			 * writer has already flushed+closed — gosteady_session_stop
+			 * is synchronous on stop_done_sem per the 2026-04-25 fix),
+			 * then BLOCK until the next session instead of spinning at
+			 * 100 Hz. Letting the app core sleep here is the single
+			 * largest idle-power win (pre-activation AND between walks).
+			 * gosteady_session_start() gives the wake signal AFTER
+			 * s_active=true, so on return the next loop sees active. */
+			if (was_active) {
+				if (bmi270_set_active(false) == 0) {
+					LOG_INF("bmi270: suspended (idle)");
+				}
+				was_active = false;
+			}
+			gosteady_session_wait_for_start();
+			continue;
+		}
+
+		if (!was_active) {
 			/* Phase 1b: idle→active transition. Resume BMI270
 			 * (was suspended between sessions to save ~325 µA),
 			 * settle for ≥2 ODR periods, discard fetches to
@@ -393,20 +440,14 @@ static void sampler_entry(void *p1, void *p2, void *p3)
 			 * Settle width chosen empirically: at 100 Hz ODR
 			 * one period is 10 ms. After PWR_CTRL.ACC_EN goes
 			 * 0→1 the chip needs at least one full period
-			 * before fresh samples are available. With only 5 ms
-			 * settle + 1 prime fetch we observed the first
-			 * captured sample of the very-first-after-boot
-			 * session reading all zeros (residual register
-			 * state). 25 ms + 2 prime fetches guarantees ≥2
-			 * full ODR periods elapse and at least one fresh
-			 * sample lands in the data registers before the
-			 * "real" fetch in the body below.
+			 * before fresh samples are available. 25 ms + 2 prime
+			 * fetches guarantees ≥2 full ODR periods elapse and at
+			 * least one fresh sample lands in the data registers
+			 * before the "real" fetch in the body below.
 			 *
-			 * Cost: only the first iteration of every session
-			 * pays this — subsequent iterations run at the
-			 * normal 10 ms tick. Session timestamp is
-			 * unaffected (session_base_ms captures AFTER the
-			 * settle; first persisted sample is t_ms ≈ 0). */
+			 * `next` is rebased here so the 10 ms tick starts fresh
+			 * after the (possibly long) idle block, not from a
+			 * stale pre-block timestamp. */
 			if (bmi270_set_active(true) == 0) {
 				LOG_INF("bmi270: resumed for session");
 			}
@@ -415,25 +456,13 @@ static void sampler_entry(void *p1, void *p2, void *p3)
 			(void)sensor_sample_fetch(bmi270); /* prime 2, discard */
 			session_base_ms = k_uptime_get_32();
 			samples_to_drop = 4; /* see comment at samples_to_drop decl */
-		} else if (!active && was_active) {
-			/* Phase 1b: active→idle transition. Session is
-			 * stopped and the writer thread has flushed and
-			 * closed the file (gosteady_session_stop is
-			 * synchronous on the writer's stop_done_sem per the
-			 * 2026-04-25 race fix). Safe to suspend BMI270
-			 * now — no in-flight reads. */
-			if (bmi270_set_active(false) == 0) {
-				LOG_INF("bmi270: suspended (idle)");
-			}
+			next = k_uptime_get_32();
 		}
 		was_active = active;
 
-		/* Skip the SPI fetch entirely when not active — chip is
-		 * suspended and the read would either fail or return
-		 * stale data, and we'd discard it anyway. Saves SPI bus
-		 * traffic + CPU cycles on every idle tick. */
-		if (active &&
-		    sensor_sample_fetch(bmi270) == 0 &&
+		/* active is guaranteed true here (the idle path blocks + continues
+		 * above). Fetch + append one sample. */
+		if (sensor_sample_fetch(bmi270) == 0 &&
 		    sensor_channel_get(bmi270, SENSOR_CHAN_ACCEL_XYZ, accel) == 0 &&
 		    sensor_channel_get(bmi270, SENSOR_CHAN_GYRO_XYZ, gyro) == 0) {
 
@@ -568,6 +597,22 @@ static void auto_start_entry(void *p1, void *p2, void *p3)
 		if (gosteady_session_is_active()) {
 			continue;
 		}
+
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+		/* Pre-activation: a session can't open yet (session_start would
+		 * return -EACCES), so skip the BMI270 confirmation entirely.
+		 * Blink the blue "pick me up to set up" indicator and nudge a
+		 * rate-limited cellular check-in so a pending `activate` cmd is
+		 * collected promptly when the user handles the cap.
+		 * See docs/specs/preactivation-lowpower-mode.md §4-5. */
+		if (!gosteady_activation_is_activated()) {
+			LOG_INF("auto-start: motion in pre-activation → blue blink + connect check");
+			blue_blink_burst();
+			gosteady_cloud_request_preact_connect();
+			(void)k_sem_reset(&motion_event_sem);  /* debounce the burst */
+			continue;
+		}
+#endif
 
 		LOG_INF("auto-start: motion observed → confirming with BMI270");
 

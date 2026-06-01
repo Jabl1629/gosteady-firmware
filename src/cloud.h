@@ -131,6 +131,19 @@ int gosteady_cloud_publish_activity(const struct gosteady_activity *a);
  */
 void gosteady_cloud_set_last_cmd_id(const char *cmd_id);
 
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+/*
+ * Pre-activation motion-triggered connect
+ * (docs/specs/preactivation-lowpower-mode.md §5). Called from the auto-start
+ * coordinator on a motion event while the device is in pre-activation: nudges
+ * the heartbeat thread to connect now (internally rate-limited to
+ * CONFIG_GOSTEADY_PREACT_MOTION_CONNECT_MIN_S) so a queued `activate` cmd is
+ * collected promptly when the user handles the cap, instead of waiting out the
+ * long pre-activation safety-net interval. No-op once activated.
+ */
+void gosteady_cloud_request_preact_connect(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif
