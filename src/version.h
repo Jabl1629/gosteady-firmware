@@ -89,6 +89,17 @@
  *                    0 faults / 0 dropped samples, clean BMI270 resume/suspend,
  *                    algo ran). Shipped to GS0000000001 (the D2C test unit),
  *                    D2C pre-claim staging intact (coord §C40).
+ *   0.15.0-wakewindow Pre-activation motion "wake window" (replaces 0.14.0's
+ *                    single rate-limited connect). On a shake the device pulses
+ *                    BLUE ~1 Hz and STAYS CONNECTED trying to activate for
+ *                    PREACT_WAKE_WINDOW_S (300 s, reset on motion, hard-capped
+ *                    at WAKE_WINDOW_MAX_S=600 s); a claim made during the window
+ *                    activates near-instantly. Success → solid GREEN confirm →
+ *                    normal. 5 min motionless → ship sleep. Transit guard:
+ *                    after MAX_WINDOWS (3) failed windows motion only blinks
+ *                    until the daily safety-net heartbeat. Gives the user a
+ *                    clear interactive "shake to set up" window instead of a
+ *                    one-shot connect that could miss a just-after claim.
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -100,7 +111,7 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.14.0-shipmode"
+#define GS_FIRMWARE_VERSION_STR "0.15.0-wakewindow"
 #elif defined(CONFIG_GOSTEADY_LOW_POWER)
 #define GS_FIRMWARE_VERSION_STR "0.13.1-pilot"
 #else

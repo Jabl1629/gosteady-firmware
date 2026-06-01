@@ -580,6 +580,80 @@ static K_SEM_DEFINE(motion_event_sem, 0, 1);
 K_THREAD_STACK_DEFINE(auto_start_stack, 2048);
 static struct k_thread auto_start_thread;
 
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+/* Green "activation succeeded" confirmation: solid green a few seconds, then
+ * dark → normal operation. */
+#define PREACT_GREEN_CONFIRM_MS  3000
+#define PREACT_PULSE_ON_MS       100
+#define PREACT_PULSE_GAP_MS      900
+
+static void preact_green_confirm(void)
+{
+	(void)gpio_pin_set_dt(&led_blue,  0);
+	(void)gpio_pin_set_dt(&led_green, 1);
+	k_msleep(PREACT_GREEN_CONFIRM_MS);
+	(void)gpio_pin_set_dt(&led_green, 0);
+}
+
+/* Pre-activation motion wake window (docs/specs/preactivation-lowpower-mode.md
+ * §4-5). On a shake: pulse blue ~1 Hz while the cloud thread stays connected
+ * trying to receive the `activate` cmd. The window lasts WAKE_WINDOW_S, reset
+ * on each motion, hard-capped at WAKE_WINDOW_MAX_S (transit guard so continuous
+ * vibration can't hold it open forever). On activation → green confirm → return
+ * (normal operation). On timeout → ship sleep; after MAX_WINDOWS consecutive
+ * failures the device backs off (motion just blinks blue) until the next daily
+ * safety-net heartbeat re-enables it. */
+static void run_preact_wake_window(void)
+{
+	/* Backed off (likely transit/storage, not onboarding): just acknowledge
+	 * the shake with a blue blink — no connect, no window. */
+	if (gosteady_cloud_preact_is_backed_off()) {
+		blue_blink_burst();
+		(void)k_sem_reset(&motion_event_sem);
+		return;
+	}
+
+	LOG_INF("preact: shake → wake window (blue pulse, connecting to activate)");
+	gosteady_cloud_preact_wake_begin();   /* cloud thread connects + holds */
+
+	const int64_t window_ms = (int64_t)CONFIG_GOSTEADY_PREACT_WAKE_WINDOW_S * 1000;
+	int64_t motionless_deadline = k_uptime_get() + window_ms;
+	int64_t hard_deadline =
+		k_uptime_get() + (int64_t)CONFIG_GOSTEADY_PREACT_WAKE_WINDOW_MAX_S * 1000;
+	bool activated = false;
+
+	while (1) {
+		if (gosteady_activation_is_activated()) { activated = true; break; }
+		int64_t now = k_uptime_get();
+		if (now >= motionless_deadline || now >= hard_deadline) {
+			break;
+		}
+		/* blue pulse ~1 Hz */
+		(void)gpio_pin_set_dt(&led_blue, 1);
+		k_msleep(PREACT_PULSE_ON_MS);
+		(void)gpio_pin_set_dt(&led_blue, 0);
+		/* wait the rest of the ~1 s, waking early on new motion to reset the
+		 * motionless timer (the hard cap is never extended). */
+		if (k_sem_take(&motion_event_sem, K_MSEC(PREACT_PULSE_GAP_MS)) == 0) {
+			motionless_deadline = k_uptime_get() + window_ms;
+		}
+	}
+
+	gosteady_cloud_preact_wake_end();   /* cloud thread disconnects */
+	(void)gpio_pin_set_dt(&led_blue, 0);
+
+	if (activated || gosteady_activation_is_activated()) {
+		LOG_INF("preact: ACTIVATED during wake window → green confirm → normal");
+		gosteady_cloud_preact_window_result(true);
+		preact_green_confirm();
+	} else {
+		LOG_INF("preact: wake window ended without activation → ship sleep");
+		gosteady_cloud_preact_window_result(false);
+	}
+	(void)k_sem_reset(&motion_event_sem);  /* debounce trailing motion */
+}
+#endif
+
 static void auto_start_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
@@ -600,16 +674,11 @@ static void auto_start_entry(void *p1, void *p2, void *p3)
 
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
 		/* Pre-activation: a session can't open yet (session_start would
-		 * return -EACCES), so skip the BMI270 confirmation entirely.
-		 * Blink the blue "pick me up to set up" indicator and nudge a
-		 * rate-limited cellular check-in so a pending `activate` cmd is
-		 * collected promptly when the user handles the cap.
-		 * See docs/specs/preactivation-lowpower-mode.md §4-5. */
+		 * return -EACCES). Run the motion wake window instead — blue pulse +
+		 * stay-connected activation attempt. See
+		 * docs/specs/preactivation-lowpower-mode.md §4-5. */
 		if (!gosteady_activation_is_activated()) {
-			LOG_INF("auto-start: motion in pre-activation → blue blink + connect check");
-			blue_blink_burst();
-			gosteady_cloud_request_preact_connect();
-			(void)k_sem_reset(&motion_event_sem);  /* debounce the burst */
+			run_preact_wake_window();
 			continue;
 		}
 #endif

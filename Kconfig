@@ -196,10 +196,12 @@ config GOSTEADY_PREACT_LOWPOWER
 	  docs/specs/preactivation-lowpower-mode.md.
 
 	  When set, in pre-activation (gosteady_activation_is_activated() false):
-	    - Motion → a brief BLUE "pick me up to set up" blink (auto-start
-	      coordinator), skipping the BMI270 confirmation (no session can open).
-	    - Motion → a rate-limited cellular connect so a pending `activate`
-	      cmd is collected promptly when the cap is handled.
+	    - Shake → a "wake window": pulse BLUE ~1 Hz while staying connected
+	      to cloud trying to receive the `activate` cmd (so a claim made
+	      during the window activates the device near-instantly). On success
+	      → solid GREEN confirmation → normal operation. On WAKE_WINDOW_S of
+	      stillness (hard-capped at WAKE_WINDOW_MAX_S) → back to ship sleep.
+	      Transit guard: after MAX_WINDOWS failed windows, motion just blinks.
 	    - Heartbeat drops to a long safety-net cadence
 	      (GOSTEADY_PREACT_HEARTBEAT_HOURS) instead of hourly.
 
@@ -220,14 +222,35 @@ config GOSTEADY_PREACT_HEARTBEAT_HOURS
 	  window even if the cap is never handled. Motion triggers an earlier
 	  connect (see GOSTEADY_PREACT_MOTION_CONNECT_MIN_S).
 
-config GOSTEADY_PREACT_MOTION_CONNECT_MIN_S
-	int "Minimum seconds between motion-triggered pre-activation connects"
+config GOSTEADY_PREACT_WAKE_WINDOW_S
+	int "Pre-activation wake-window length (seconds, reset on motion)"
 	depends on GOSTEADY_PREACT_LOWPOWER
-	default 900
+	default 300
 	help
-	  Rate-limit on motion-triggered cellular connects in pre-activation so
-	  sustained handling doesn't spam the radio / SIM data. The blue blink
-	  still fires on every motion (cheap); only the connect is throttled.
+	  On a shake, the device stays awake (blue pulse + connected, trying to
+	  activate) for this long. The timer RESETS on each motion, so the window
+	  effectively closes after this many seconds of stillness. Default 300 s
+	  (5 min) — generous for "claim in app → shake → activate".
+
+config GOSTEADY_PREACT_WAKE_WINDOW_MAX_S
+	int "Pre-activation wake-window hard cap (seconds, NOT reset by motion)"
+	depends on GOSTEADY_PREACT_LOWPOWER
+	default 600
+	help
+	  Absolute ceiling on a single wake window regardless of motion — the
+	  transit guard so continuous vibration (a cap in a shipping truck) can't
+	  hold the window open and the radio on indefinitely. Default 600 s (10 min).
+
+config GOSTEADY_PREACT_MAX_WINDOWS
+	int "Consecutive failed wake windows before transit back-off"
+	depends on GOSTEADY_PREACT_LOWPOWER
+	default 3
+	help
+	  After this many wake windows close without activation, the device backs
+	  off: further motion just blinks blue (no connect / no window) until the
+	  next daily safety-net heartbeat re-enables it. Bounds the connected time
+	  during shipping/storage (no claim coming) while still giving real
+	  onboarding several window attempts. Default 3.
 
 config GOSTEADY_FORENSICS_ENABLE
 	bool "Enable crash forensics + watchdog (M10.7.3)"

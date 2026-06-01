@@ -133,15 +133,27 @@ void gosteady_cloud_set_last_cmd_id(const char *cmd_id);
 
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
 /*
- * Pre-activation motion-triggered connect
- * (docs/specs/preactivation-lowpower-mode.md §5). Called from the auto-start
- * coordinator on a motion event while the device is in pre-activation: nudges
- * the heartbeat thread to connect now (internally rate-limited to
- * CONFIG_GOSTEADY_PREACT_MOTION_CONNECT_MIN_S) so a queued `activate` cmd is
- * collected promptly when the user handles the cap, instead of waiting out the
- * long pre-activation safety-net interval. No-op once activated.
+ * Pre-activation motion "wake window" (docs/specs/preactivation-lowpower-mode.md
+ * §5). Driven by the auto-start coordinator (src/main.c). On a shake the
+ * coordinator calls _wake_begin(), which connects to cloud and STAYS connected
+ * (so a claim made during the window is pushed by the broker → instant
+ * activation) until the coordinator calls _wake_end() (window expired) or the
+ * device activates. The coordinator owns the 5-min timer + blue pulse + green
+ * confirmation; cloud owns the connection.
  */
-void gosteady_cloud_request_preact_connect(void);
+void gosteady_cloud_preact_wake_begin(void);
+void gosteady_cloud_preact_wake_end(void);
+
+/*
+ * Transit back-off (so a cap vibrating in a shipping box doesn't stay awake +
+ * connected). The coordinator reports each window's outcome via
+ * _window_result(activated); after CONFIG_GOSTEADY_PREACT_MAX_WINDOWS
+ * consecutive failures the coordinator should stop opening windows
+ * (_is_backed_off() returns true) and just blink blue on motion. Back-off is
+ * cleared on the next daily safety-net heartbeat and on activation.
+ */
+void gosteady_cloud_preact_window_result(bool activated);
+bool gosteady_cloud_preact_is_backed_off(void);
 #endif
 
 #ifdef __cplusplus

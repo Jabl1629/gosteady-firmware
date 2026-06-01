@@ -93,27 +93,51 @@ static struct mqtt_topic s_app_topics[1];
 #define HEARTBEAT_MAX_ATTEMPTS 3
 
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-/* Pre-activation cadence (docs/specs/preactivation-lowpower-mode.md §5): a long
- * safety-net interval, interruptible by a motion-triggered connect so the
- * device collects its `activate` cmd promptly when the user handles the cap
- * instead of waiting out the full interval. Switches to HEARTBEAT_INTERVAL
- * once activated. */
+/* Pre-activation safety-net cadence: a long backstop heartbeat so the cloud
+ * sees a never-handled cap; the motion wake window (below) does the real
+ * activation work. See docs/specs/preactivation-lowpower-mode.md §5. */
 #define PREACT_HEARTBEAT_INTERVAL \
 	K_SECONDS(CONFIG_GOSTEADY_PREACT_HEARTBEAT_HOURS * 3600)
-#define PREACT_MOTION_CONNECT_MIN_MS \
-	(CONFIG_GOSTEADY_PREACT_MOTION_CONNECT_MIN_S * 1000)
-static K_SEM_DEFINE(preact_connect_sem, 0, 1);
 
-void gosteady_cloud_request_preact_connect(void)
+/* Coordinator (src/main.c) → cloud: open/close a stay-connected wake window.
+ * s_preact_wake_active keeps the connection up while the coordinator runs the
+ * 5-min blue-pulse window; cleared by _wake_end() or by activation. */
+static K_SEM_DEFINE(preact_wake_sem, 0, 1);
+static atomic_t s_preact_wake_active = ATOMIC_INIT(0);
+
+/* Transit back-off: consecutive failed windows (a cap vibrating in a shipping
+ * box). Reset on activation and on each daily safety-net heartbeat. */
+static atomic_t s_preact_failed_windows = ATOMIC_INIT(0);
+static atomic_t s_preact_backed_off     = ATOMIC_INIT(0);
+
+void gosteady_cloud_preact_wake_begin(void)
 {
-	static uint32_t last_req_ms;
-	uint32_t now = k_uptime_get_32();
-	if (last_req_ms != 0 &&
-	    (now - last_req_ms) < (uint32_t)PREACT_MOTION_CONNECT_MIN_MS) {
-		return;  /* rate-limit cellular wakeups under sustained handling */
+	atomic_set(&s_preact_wake_active, 1);
+	k_sem_give(&preact_wake_sem);
+}
+
+void gosteady_cloud_preact_wake_end(void)
+{
+	atomic_set(&s_preact_wake_active, 0);  /* connect_publish_stay's loop exits */
+}
+
+void gosteady_cloud_preact_window_result(bool activated)
+{
+	if (activated) {
+		atomic_set(&s_preact_failed_windows, 0);
+		atomic_set(&s_preact_backed_off, 0);
+		return;
 	}
-	last_req_ms = now;
-	k_sem_give(&preact_connect_sem);
+	int n = (int)atomic_inc(&s_preact_failed_windows) + 1;
+	if (n >= CONFIG_GOSTEADY_PREACT_MAX_WINDOWS) {
+		atomic_set(&s_preact_backed_off, 1);
+		LOG_INF("preact: %d failed windows → transit back-off (motion blinks only until next safety-net)", n);
+	}
+}
+
+bool gosteady_cloud_preact_is_backed_off(void)
+{
+	return atomic_get(&s_preact_backed_off) != 0;
 }
 #endif
 
@@ -588,6 +612,66 @@ out_unlock:
 	return rc;
 }
 
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+/* Pre-activation wake-window connect (docs/specs/preactivation-lowpower-mode.md
+ * §5): connect, publish one heartbeat, then STAY connected (the aws_iot lib's
+ * own thread dispatches incoming cmds → handle_activate_cmd) until the
+ * coordinator ends the window (s_preact_wake_active=0) or the device activates.
+ * A claim made DURING the window is pushed straight to the subscribed device
+ * (instant activation); a claim made just before is re-published by the §C24
+ * coordinator on this CONNECT. Modeled on connect_publish_disconnect but holds
+ * the connection open for the window instead of the 1.5 s linger. */
+static int connect_publish_stay(const char *topic, size_t topic_len,
+				 const char *payload, size_t payload_len)
+{
+	int rc;
+	k_mutex_lock(&s_aws_mutex, K_FOREVER);
+
+	rc = wait_for_cellular_ready();
+	if (rc) {
+		goto out_unlock;
+	}
+
+	k_sem_reset(&s_connected);
+	k_sem_reset(&s_disconnected);
+	rc = aws_iot_connect(NULL);
+	if (rc) {
+		LOG_ERR("preact wake: aws_iot_connect %d", rc);
+		goto out_unlock;
+	}
+	rc = k_sem_take(&s_connected, CONNECT_WAIT);
+	if (rc) {
+		LOG_ERR("preact wake: CONNECTED not received");
+		goto out_disconnect;
+	}
+
+	struct aws_iot_data tx = {
+		.qos = MQTT_QOS_1_AT_LEAST_ONCE,
+		.topic = { .type = AWS_IOT_SHADOW_TOPIC_NONE,
+			   .str = topic, .len = topic_len },
+		.ptr = (char *)payload, .len = payload_len,
+	};
+	k_sem_reset(&s_puback);
+	if (aws_iot_send(&tx) == 0) {
+		(void)k_sem_take(&s_puback, PUBACK_WAIT);  /* best-effort */
+	}
+
+	LOG_INF("preact wake: connected — holding to receive activate cmd");
+	while (atomic_get(&s_preact_wake_active) &&
+	       !gosteady_activation_is_activated()) {
+		k_sleep(K_MSEC(500));
+	}
+	rc = 0;
+
+out_disconnect:
+	(void)aws_iot_disconnect();
+	(void)k_sem_take(&s_disconnected, DISCONNECT_WAIT);
+out_unlock:
+	k_mutex_unlock(&s_aws_mutex);
+	return rc;
+}
+#endif
+
 #if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
 /* M12.1f snippet upload primitive — used as the publish callback that
  * snippet.c invokes from gosteady_snippet_upload_one. The connection
@@ -852,21 +936,52 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 		return;
 	}
 
-	/* Production hourly cadence: publish, sleep one interval, repeat.
-	 * The cloud's offline-detection threshold is 2 hr without a heartbeat,
-	 * so a single missed publish (e.g., after retry exhaustion) doesn't
-	 * trip an alert; two in a row will. */
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+	/* Boot heartbeat so the cloud sees the device immediately — in pre-
+	 * activation the loop below blocks on the wake/safety-net wait and would
+	 * otherwise not publish until the first shake or the 24 h safety net. */
+	(void)heartbeat_publish_with_retry(topic, (size_t)t);
+#endif
+
+	/* Cadence: activated → hourly. Pre-activation → block until a shake opens
+	 * a stay-connected wake window (the coordinator in src/main.c drives the
+	 * 5-min timer + blue pulse + green confirm; we just hold the connection
+	 * open here so a claim made during the window is pushed straight to the
+	 * device) OR until the long safety-net interval fires a backstop heartbeat.
+	 * See docs/specs/preactivation-lowpower-mode.md §5. */
 	int iter = 0;
 	while (1) {
+#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+		if (!gosteady_activation_is_activated()) {
+			int r = k_sem_take(&preact_wake_sem, PREACT_HEARTBEAT_INTERVAL);
+			if (r == 0) {
+				/* shake → stay-connected wake window (publishes its own
+				 * heartbeat on connect, then holds for the activate cmd). */
+				char payload[HEARTBEAT_PAYLOAD_MAX];
+				size_t plen = 0;
+				if (build_heartbeat_payload(payload, sizeof(payload),
+							    &plen) == 0) {
+					(void)connect_publish_stay(topic, (size_t)t,
+								   payload, plen);
+				}
+				/* If activated during the window, the next iteration takes
+				 * the activated branch and publishes the last_cmd_id ack. */
+			} else {
+				/* safety-net timeout → backstop heartbeat + reset the transit
+				 * back-off so each daily cycle re-enables the wake window. */
+				(void)heartbeat_publish_with_retry(topic, (size_t)t);
+				atomic_set(&s_preact_failed_windows, 0);
+				atomic_set(&s_preact_backed_off, 0);
+			}
+			continue;
+		}
+#endif
+		/* Activated (or non-PREACT build): hourly heartbeat. */
 		LOG_INF("heartbeat tick #%d (cadence=%d s)", iter++,
 			(int)k_ticks_to_ms_floor32(HEARTBEAT_INTERVAL.ticks) / 1000);
 
 #if defined(CONFIG_GOSTEADY_SNIPPET_ENABLE)
-		/* FMEA 6.1 (2026-05-10): hourly snippet rotation. Stale-cutoff
-		 * pass uses cellular UTC (available by now since this thread
-		 * already passed wait_for_cellular_ready before the loop).
-		 * Free-space pass runs regardless of cellular state. Cheap
-		 * when partition is healthy (no-op iteration). */
+		/* FMEA 6.1: hourly snippet rotation (cheap no-op when healthy). */
 		int rotated = gosteady_snippet_rotate(GOSTEADY_SNIPPET_STALE_AGE_S,
 						       GOSTEADY_SNIPPET_ROTATE_THRESHOLD);
 		if (rotated > 0) {
@@ -876,25 +991,10 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 
 		int rc = heartbeat_publish_with_retry(topic, (size_t)t);
 		if (rc != 0) {
-			LOG_ERR("heartbeat tick #%d FAILED after %d attempts (%d) — waiting for next interval",
+			LOG_ERR("heartbeat tick #%d FAILED after %d attempts (%d)",
 				iter - 1, HEARTBEAT_MAX_ATTEMPTS, rc);
 		}
-#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-		/* Cadence: activated → hourly; pre-activation → long safety net,
-		 * but wake early on a motion-triggered connect request so a pending
-		 * `activate` cmd is collected when the user handles the cap. The
-		 * sem-take returns 0 on a motion request and -EAGAIN on the
-		 * safety-net timeout — either way we loop and publish (which
-		 * collects the cmd in the post-PUBACK linger).
-		 * See docs/specs/preactivation-lowpower-mode.md §5. */
-		if (gosteady_activation_is_activated()) {
-			k_sleep(HEARTBEAT_INTERVAL);
-		} else {
-			(void)k_sem_take(&preact_connect_sem, PREACT_HEARTBEAT_INTERVAL);
-		}
-#else
 		k_sleep(HEARTBEAT_INTERVAL);
-#endif
 	}
 }
 
