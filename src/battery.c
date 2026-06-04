@@ -201,6 +201,54 @@ static int fuel_gauge_init_locked(void)
 	return 0;
 }
 
+/* ---- Voltage-based (OCV) state-of-charge ----
+ *
+ * We report SoC from a voltage→open-circuit-voltage lookup, NOT the
+ * nrf_fuel_gauge coulomb-fused estimate. At this device's sub-mA idle draw the
+ * nPM1300 current measurement is unreliable, so the lib's coulomb term drifts
+ * SoC toward 0 over a day even at a healthy voltage — observed on
+ * GS9999999998 (coord §C41): the gauge reported 0% while the cell sat at
+ * 4.086 V (~86% actual), never having browned out. Terminal voltage ≈ OCV at
+ * our currents, so the OCV table is robust, monotonic, and never diverges.
+ *
+ * Generic single-cell LiPo curve (resting mV → SoC %). Good enough for the
+ * pilot; replace with a cell-characterised LP803448 curve later. Sanity:
+ * 4086 mV interpolates to ~86%, matching the GS9999999998 observation.
+ */
+struct ocv_point { uint16_t mv; uint8_t soc; };
+static const struct ocv_point OCV_TABLE[] = {
+	{4200, 100}, {4160, 95}, {4120, 90}, {4080, 85}, {4020, 80},
+	{3980, 75},  {3940, 70}, {3900, 65}, {3860, 60}, {3830, 55},
+	{3800, 50},  {3770, 45}, {3740, 40}, {3700, 35}, {3680, 30},
+	{3650, 25},  {3620, 20}, {3590, 15}, {3550, 10}, {3500,  7},
+	{3450,  5},  {3400,  3}, {3300,  2}, {3200,  1}, {3000,  0},
+};
+
+/* Piecewise-linear interpolation; returns SoC as a 0.0–1.0 fraction.
+ * Clamps outside the table range. Table is in descending-voltage order. */
+static float ocv_soc_from_mv(uint16_t mv)
+{
+	if (mv >= OCV_TABLE[0].mv) { return 1.0f; }
+	const size_t n = ARRAY_SIZE(OCV_TABLE);
+	if (mv <= OCV_TABLE[n - 1].mv) { return 0.0f; }
+	for (size_t i = 0; i < n - 1; i++) {
+		uint16_t hi = OCV_TABLE[i].mv;      /* higher voltage */
+		uint16_t lo = OCV_TABLE[i + 1].mv;  /* lower voltage */
+		if (mv <= hi && mv >= lo) {
+			float frac = (float)(mv - lo) / (float)(hi - lo);
+			float soc  = (float)OCV_TABLE[i + 1].soc +
+				     frac * ((float)OCV_TABLE[i].soc - (float)OCV_TABLE[i + 1].soc);
+			return soc / 100.0f;
+		}
+	}
+	return 0.0f;  /* unreachable */
+}
+
+/* EMA factor smoothing transient load sag (a sample landing during a heartbeat
+ * TX or session reads below OCV). ~4-sample time constant at the 60 s LOW_POWER
+ * cadence. */
+#define SOC_EMA_ALPHA  0.25f
+
 /* Run one fuel-gauge update tick. Called from the worker thread; safe to
  * read+write s_cached_* under s_lock. */
 static int fuel_gauge_update_locked(void)
@@ -224,20 +272,30 @@ static int fuel_gauge_update_locked(void)
 		(void)charge_status_inform(chg_status);
 	}
 
+	/* Keep running the lib only for a side-by-side diagnostic log; its SoC is
+	 * NOT used for the reported value (it drifts — see the OCV note above). */
 	float delta = (float)k_uptime_delta(&s_ref_time) / 1000.0f;
 	soc = nrf_fuel_gauge_process(voltage, -current, temp, delta, NULL);
 
-	/* SoC clamp: lib can return mildly out-of-range values during
-	 * settling. Cloud schema requires 0.0–1.0. */
-	if (soc < 0.0f) { soc = 0.0f; }
-	if (soc > 100.0f) { soc = 100.0f; }
+	uint16_t mv = (uint16_t)(voltage * 1000.0f + 0.5f);
 
-	s_cached_mv  = (uint16_t)(voltage * 1000.0f + 0.5f);
-	s_cached_pct = soc / 100.0f;
+	/* Authoritative SoC = voltage→OCV lookup, lightly EMA-smoothed against
+	 * transient load sag. Seed the filter on the first reading. */
+	float ocv_pct = ocv_soc_from_mv(mv);
+	if (atomic_get(&s_first_reading_landed)) {
+		s_cached_pct = (1.0f - SOC_EMA_ALPHA) * s_cached_pct +
+			       SOC_EMA_ALPHA * ocv_pct;
+	} else {
+		s_cached_pct = ocv_pct;
+	}
+
+	s_cached_mv  = mv;
 	s_cached_current_a = current;
 	s_cached_vbus = vbus;
 
 	atomic_set(&s_first_reading_landed, 1);
+	LOG_DBG("soc: ocv=%.1f%% (v=%u mV) | lib=%.1f%% (ignored)",
+		(double)(s_cached_pct * 100.0f), (unsigned)mv, (double)soc);
 	return 0;
 }
 

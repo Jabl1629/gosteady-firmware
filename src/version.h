@@ -106,6 +106,14 @@
  *                    fixed 100/900 ms 1 Hz independent of motion (motion checked
  *                    non-blocking). Removed the legacy blue_blink_burst (2-flash
  *                    burst) entirely; a backed-off cap now stays dark on motion.
+ *   *.*.x  (battery)  Voltage-based (OCV) state-of-charge [UNCONDITIONAL, all
+ *                    builds] — battery_pct now comes from a voltage→OCV lookup
+ *                    (battery.c), not the nrf_fuel_gauge coulomb-fused estimate.
+ *                    The lib drifts SoC to 0 over a day at our sub-mA idle draw
+ *                    (nPM1300 current unreliable there); observed on
+ *                    GS9999999998 reading 0% at 4.086 V / ~86% actual after 3.4
+ *                    days, never having browned out (coord §C41). Patch-bumped
+ *                    across configs: 0.12.1-psm / 0.13.2-pilot / 0.15.2-wakewindow.
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -117,11 +125,11 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.15.1-wakewindow"
+#define GS_FIRMWARE_VERSION_STR "0.15.2-wakewindow"
 #elif defined(CONFIG_GOSTEADY_LOW_POWER)
-#define GS_FIRMWARE_VERSION_STR "0.13.1-pilot"
+#define GS_FIRMWARE_VERSION_STR "0.13.2-pilot"
 #else
-#define GS_FIRMWARE_VERSION_STR "0.12.0-psm"
+#define GS_FIRMWARE_VERSION_STR "0.12.1-psm"
 #endif
 
 #endif /* GOSTEADY_VERSION_H_ */
