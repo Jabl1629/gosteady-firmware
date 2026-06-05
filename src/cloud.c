@@ -92,6 +92,23 @@ static struct mqtt_topic s_app_topics[1];
 #define HEARTBEAT_RETRY_3RD   K_SECONDS(60 * 15)
 #define HEARTBEAT_MAX_ATTEMPTS 3
 
+/* Interruptible activated-heartbeat sleep. The activated branch of
+ * heartbeat_thread_fn used to k_sleep(HEARTBEAT_INTERVAL) blindly for an hour.
+ * If a wipe flipped the device activated→pre-activation mid-sleep, the thread
+ * stayed parked in the activated branch — NOT serving the pre-activation wake
+ * windows — for up to a full hour, so a shake's blue-pulse wake window never
+ * got a connection and the queued `activate` cmd was never collected (only a
+ * reboot, whose fresh boot heartbeat connects, recovered it). gosteady_cloud_
+ * notify_deactivated() (called from gosteady_activation_clear) gives this sem so
+ * the thread wakes immediately, re-checks activation, and drops into the
+ * pre-activation wake-window branch. */
+static K_SEM_DEFINE(heartbeat_wake_sem, 0, 1);
+
+void gosteady_cloud_notify_deactivated(void)
+{
+	k_sem_give(&heartbeat_wake_sem);
+}
+
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
 /* Pre-activation safety-net cadence: a long backstop heartbeat so the cloud
  * sees a never-handled cap; the motion wake window (below) does the real
@@ -994,7 +1011,13 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 			LOG_ERR("heartbeat tick #%d FAILED after %d attempts (%d)",
 				iter - 1, HEARTBEAT_MAX_ATTEMPTS, rc);
 		}
-		k_sleep(HEARTBEAT_INTERVAL);
+		/* Interruptible cadence sleep: wakes early when gosteady_activation_
+		 * clear() (wipe / de-provision) gives heartbeat_wake_sem, so the next
+		 * iteration immediately sees !is_activated() and enters the pre-
+		 * activation wake-window branch instead of sleeping out the full hour.
+		 * On a normal expiry it behaves exactly like k_sleep(HEARTBEAT_INTERVAL).
+		 * (A spurious wake just re-publishes a heartbeat — harmless.) */
+		(void)k_sem_take(&heartbeat_wake_sem, HEARTBEAT_INTERVAL);
 	}
 }
 

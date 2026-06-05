@@ -33,6 +33,15 @@
 
 LOG_MODULE_REGISTER(gs_activation, LOG_LEVEL_INF);
 
+/* cloud.c notify — wakes the heartbeat thread out of its activated-cadence sleep
+ * the moment we clear activation below, so it promptly re-enters the pre-
+ * activation wake-window branch (otherwise a shake right after a wipe finds the
+ * cloud thread still parked in the activated branch for up to an hour). extern,
+ * not a cloud.h include — mirrors wipe.c's gosteady_cloud_set_last_cmd_id; both
+ * .c files are co-gated on CONFIG_GOSTEADY_CLOUD_ENABLE so the symbol is always
+ * present. */
+extern void gosteady_cloud_notify_deactivated(void);
+
 #define ACTIVATION_PATH       "/lfs/activation.bin"
 #define ACTIVATION_MAGIC      0x47535631u  /* 'GSV1' = GoSteady V1 activation */
 #define ACTIVATION_VERSION    1u
@@ -201,6 +210,10 @@ int gosteady_activation_clear(void)
 	int ret = fs_unlink(ACTIVATION_PATH);
 	k_mutex_unlock(&s_lock);
 	atomic_set(&s_activated, 0);
+	/* Wake the heartbeat thread so it leaves the activated-cadence sleep and
+	 * starts serving pre-activation wake windows immediately (set s_activated=0
+	 * first so the woken thread observes the cleared state). */
+	gosteady_cloud_notify_deactivated();
 	if (ret == 0 || ret == -ENOENT) {
 		LOG_WRN("activation cleared — device re-entered pre-activation state");
 		return 0;

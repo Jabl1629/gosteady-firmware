@@ -114,6 +114,18 @@
  *                    GS9999999998 reading 0% at 4.086 V / ~86% actual after 3.4
  *                    days, never having browned out (coord §C41). Patch-bumped
  *                    across configs: 0.12.1-psm / 0.13.2-pilot / 0.15.2-wakewindow.
+ *   0.15.3-wakewindow Fix: wipe→shake reactivation hang. The heartbeat thread's
+ *                    activated branch blind-slept k_sleep(HEARTBEAT_INTERVAL) for
+ *                    an hour; a wipe (activated→pre-activation) mid-sleep left it
+ *                    parked in the activated branch NOT serving wake windows, so
+ *                    a shake's blue-pulse window never got a connection and the
+ *                    queued activate cmd was never collected — only a reboot
+ *                    recovered it (its fresh boot heartbeat connects). Now the
+ *                    activated sleep is interruptible (k_sem_take on
+ *                    heartbeat_wake_sem) and gosteady_activation_clear() gives the
+ *                    sem, so a wipe drops the thread straight into the pre-
+ *                    activation wake-window branch → a shake reactivates with no
+ *                    reboot. Confirmed on GS0000000001 (coord §C44.5).
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -125,7 +137,7 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.15.2-wakewindow"
+#define GS_FIRMWARE_VERSION_STR "0.15.3-wakewindow"
 #elif defined(CONFIG_GOSTEADY_LOW_POWER)
 #define GS_FIRMWARE_VERSION_STR "0.13.2-pilot"
 #else

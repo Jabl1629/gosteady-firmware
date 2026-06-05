@@ -131,6 +131,18 @@ int gosteady_cloud_publish_activity(const struct gosteady_activity *a);
  */
 void gosteady_cloud_set_last_cmd_id(const char *cmd_id);
 
+/*
+ * Called from gosteady_activation_clear() the instant the device transitions
+ * activated→pre-activation (wipe or cloud-side de-provision). Wakes the
+ * heartbeat thread out of its activated HEARTBEAT_INTERVAL sleep so it
+ * immediately re-enters the pre-activation wake-window-serving branch. Without
+ * it, a shake right after a wipe opens blue-pulse wake windows that the cloud
+ * thread — still parked in the activated branch for up to an hour — never
+ * connects for, so the queued `activate` cmd is never collected until a reboot.
+ * See heartbeat_thread_fn.
+ */
+void gosteady_cloud_notify_deactivated(void);
+
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
 /*
  * Pre-activation motion "wake window" (docs/specs/preactivation-lowpower-mode.md
