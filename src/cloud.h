@@ -56,6 +56,7 @@ struct gosteady_activity {
 	float    distance_ft;
 	uint32_t active_min;
 	float    roughness_R;                 /* NaN → omit */
+	float    gait_speed_fts;              /* session-avg walking speed, ft/s; NaN → omit (guards failed) */
 	uint8_t  surface_class;               /* 0xFF → omit */
 	/* [16] was too small for "0.10.0-at-timeout" (17 chars + null = 18 bytes);
 	 * surfaced 2026-05-17 — payload showed "firmware_version":"0.10.0-at-timeo"

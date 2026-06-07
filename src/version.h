@@ -126,6 +126,18 @@
  *                    sem, so a wipe drops the thread straight into the pre-
  *                    activation wake-window branch → a shake reactivates with no
  *                    reboot. Confirmed on GS0000000001 (coord §C44.5).
+ *   0.16.0-gait      Gait speed + decoupled step counter [UNCONDITIONAL, all
+ *                    builds]. Spec gosteady-portal/docs/specs/2026-06-07-gait-
+ *                    speed.md (coord §C46). session-finalize now also produces
+ *                    (a) a de-satellited step count — the reported `steps` is
+ *                    the emitted impulse train after a 0.8 s refractory merge
+ *                    (distance still consumes every peak), cutting the ~1.5×
+ *                    slow-walk over-count (53-vs-33 live) to ~16% MAPE — and
+ *                    (b) gait_speed_fts = distance_ft / peak-train walking time,
+ *                    a NEW optional activity field (omitted when merged steps<5
+ *                    / walking<3 s / session saturated). `steps` sharpens ~30%;
+ *                    split cloud cohorts on firmware_version. Per-config suffix
+ *                    (wakewindow/pilot/psm) preserved.
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -137,11 +149,11 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.15.3-wakewindow"
+#define GS_FIRMWARE_VERSION_STR "0.16.0-gait-wakewindow"
 #elif defined(CONFIG_GOSTEADY_LOW_POWER)
-#define GS_FIRMWARE_VERSION_STR "0.13.2-pilot"
+#define GS_FIRMWARE_VERSION_STR "0.16.0-gait-pilot"
 #else
-#define GS_FIRMWARE_VERSION_STR "0.12.1-psm"
+#define GS_FIRMWARE_VERSION_STR "0.16.0-gait-psm"
 #endif
 
 #endif /* GOSTEADY_VERSION_H_ */

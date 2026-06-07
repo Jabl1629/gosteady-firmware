@@ -5,10 +5,10 @@
  *     algo/venv/bin/python3 -m algo.export_c_header
  *
  * Generator:        algo/export_c_header.py
- * Generated (UTC):  2026-04-25T22:42:16+00:00
- * Git commit:       8008c5021cfa (DIRTY WORKING TREE)
+ * Generated (UTC):  2026-06-07T20:05:13+00:00
+ * Git commit:       2e2008309f47 (DIRTY WORKING TREE)
  * Algorithm:        V1 — auto-surface roughness adjustment
- * Algo version:     0.6.0-algo-v1
+ * Algo version:     0.7.0-algo-v1.1
  *
  * Coefficient provenance:
  *   indoor stride fit on 8 valid walks from raw_sessions/2026-04-23/
@@ -88,9 +88,25 @@ static const float gs_stride_amp_coeff[GS_NUM_SURFACES] = {
     +1.820037386e+00f,  /* GS_SURFACE_OUTDOOR */
 };
 
+/* === Gait speed + decoupled step counter (post-processed at finalize) ===
+ * Reported step count = the emitted peak train after a refractory merge
+ * (a peak counts as a step only if >= GS_STEP_MERGE_GAP_SAMPLES from the
+ * last KEPT step). Distance still consumes ALL peaks — this is count-only.
+ * Gait = distance_ft / walking_time_s, where walking_time_s sums inter-peak
+ * gaps <= GS_STRIDE_GAP_CAP_SAMPLES (+ one mean gated gap for the leading
+ * partial stride). Gait is omitted unless merged steps >= GS_GAIT_MIN_STEPS AND
+ * walking_time_s >= GS_GAIT_MIN_WALK_S AND the session did not overflow.
+ */
+#define GS_STEP_MERGE_GAP_S               0.800f
+#define GS_STEP_MERGE_GAP_SAMPLES         80
+#define GS_STRIDE_GAP_CAP_S               2.500f
+#define GS_STRIDE_GAP_CAP_SAMPLES         250
+#define GS_GAIT_MIN_STEPS                 5
+#define GS_GAIT_MIN_WALK_S                3.000f
+
 /* === Provenance strings (also include in telemetry / logs) === */
-#define GS_ALGO_VERSION_STR               "0.6.0-algo-v1"
-#define GS_ALGO_PARAMS_GIT_SHA            "8008c5021cfa (DIRTY WORKING TREE)"
-#define GS_ALGO_PARAMS_GEN_UTC            "2026-04-25T22:42:16+00:00"
+#define GS_ALGO_VERSION_STR               "0.7.0-algo-v1.1"
+#define GS_ALGO_PARAMS_GIT_SHA            "2e2008309f47 (DIRTY WORKING TREE)"
+#define GS_ALGO_PARAMS_GEN_UTC            "2026-06-07T20:05:13+00:00"
 
 #endif /* GOSTEADY_ALGO_PARAMS_H */

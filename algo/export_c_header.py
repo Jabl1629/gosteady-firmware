@@ -88,9 +88,23 @@ ROUGH_HALF_WINDOW_S = 0.2
 # midpoint between indoor and outdoor R distributions on n=16 walks).
 R_THRESHOLD = 0.245
 
+# === Gait speed + decoupled step counter (2026-06-07; spec
+# gosteady-portal/docs/specs/2026-06-07-gait-speed.md, coord §C46) ===
+# These post-process the emitted peak train at session-finalize; the
+# distance / roughness / surface pipeline is unchanged. The step COUNT the
+# firmware reports is de-satellited by a refractory merge that is decoupled
+# from the distance peak train (distance still consumes every peak). Gait
+# speed = distance_ft / peak-train walking time. Validated on 15
+# hand-counted walks (merge 0.8 s: step MAPE 47%→16%, slow-walk 78%→7%,
+# zero distance cost — see the spec's evidence tables).
+STEP_MERGE_GAP_S = 0.8     # reported step count: drop a peak < this from the last KEPT step
+STRIDE_GAP_CAP_S = 2.5     # walking time: inter-peak gaps longer than this are between-bout pauses
+GAIT_MIN_STEPS = 5         # gait floor: omit gait below this merged step count
+GAIT_MIN_WALK_S = 3.0      # gait floor: omit gait below this walking time (s)
+
 # Algorithm version string stamped into the firmware build. Bump when
 # any locked constant above changes OR when the M10 C port lands.
-ALGO_VERSION_STR = "0.6.0-algo-v1"
+ALGO_VERSION_STR = "0.7.0-algo-v1.1"
 
 
 # =====================================================================
@@ -341,6 +355,22 @@ def _emit_header(
         f"    {indoor_c1:+.9e}f,  /* GS_SURFACE_INDOOR  */",
         f"    {outdoor_c1:+.9e}f,  /* GS_SURFACE_OUTDOOR */",
         "};",
+        "",
+        "/* === Gait speed + decoupled step counter (post-processed at finalize) ===",
+        " * Reported step count = the emitted peak train after a refractory merge",
+        " * (a peak counts as a step only if >= GS_STEP_MERGE_GAP_SAMPLES from the",
+        " * last KEPT step). Distance still consumes ALL peaks — this is count-only.",
+        " * Gait = distance_ft / walking_time_s, where walking_time_s sums inter-peak",
+        " * gaps <= GS_STRIDE_GAP_CAP_SAMPLES (+ one mean gated gap for the leading",
+        " * partial stride). Gait is omitted unless merged steps >= GS_GAIT_MIN_STEPS AND",
+        " * walking_time_s >= GS_GAIT_MIN_WALK_S AND the session did not overflow.",
+        " */",
+        f"#define GS_STEP_MERGE_GAP_S               {STEP_MERGE_GAP_S:.3f}f",
+        f"#define GS_STEP_MERGE_GAP_SAMPLES         {int(round(STEP_MERGE_GAP_S * FS_HZ))}",
+        f"#define GS_STRIDE_GAP_CAP_S               {STRIDE_GAP_CAP_S:.3f}f",
+        f"#define GS_STRIDE_GAP_CAP_SAMPLES         {int(round(STRIDE_GAP_CAP_S * FS_HZ))}",
+        f"#define GS_GAIT_MIN_STEPS                 {GAIT_MIN_STEPS}",
+        f"#define GS_GAIT_MIN_WALK_S                {GAIT_MIN_WALK_S:.3f}f",
         "",
         "/* === Provenance strings (also include in telemetry / logs) === */",
         f'#define GS_ALGO_VERSION_STR               "{ALGO_VERSION_STR}"',

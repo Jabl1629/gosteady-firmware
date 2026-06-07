@@ -1059,6 +1059,13 @@ static int build_activity_payload(const struct gosteady_activity *a,
 		n += m;
 	}
 
+	if (isfinite((double)a->gait_speed_fts)) {
+		int m = snprintf(buf + n, buflen - (size_t)n,
+				 ",\"gait_speed_fts\":%.2f", (double)a->gait_speed_fts);
+		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
+		n += m;
+	}
+
 	if (a->surface_class == GOSTEADY_ACTIVITY_SURFACE_INDOOR) {
 		int m = snprintf(buf + n, buflen - (size_t)n,
 				 ",\"surface_class\":\"indoor\"");

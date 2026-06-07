@@ -234,6 +234,50 @@ static void test_step_detector(const struct test_fixture *fix, const char *name)
 	}
 }
 
+/* Synthetic unit tests for the decoupled step counter + gait denominator.
+ * Hand-computed expectations; independent of the reference-vector fixtures. */
+static void test_gait_synthetic(void)
+{
+	printf("\n=== gait / step-merge synthetic units ===\n");
+	const float    fs  = GS_FS_HZ;                    /* 100 */
+	const uint32_t mg  = GS_STEP_MERGE_GAP_SAMPLES;   /* 80  (0.8 s) */
+	const uint32_t cap = GS_STRIDE_GAP_CAP_SAMPLES;   /* 250 (2.5 s) */
+
+	/* empty + single peak (no NULL deref: n<1/n<2 short-circuit) */
+	CHECK(gs_merge_step_count(NULL, 0u, mg) == 0u, "merge: empty -> 0");
+	CHECK(gs_walking_time_from_peaks(NULL, 0u, cap, fs) == 0.0f,
+	      "walk: empty -> 0");
+	{
+		const uint32_t idx[] = {10u};
+		CHECK(gs_merge_step_count(idx, 1u, mg) == 1u, "merge: single -> 1");
+		CHECK(gs_walking_time_from_peaks(idx, 1u, cap, fs) == 0.0f,
+		      "walk: single -> 0");
+	}
+	/* 0.6 s-spaced train (gap 60 < 80) -> every other peak merges away.
+	 * kept: 0, then 120, 240 -> 3. walk: 5 gaps×60 = 300 + mean 60 = 3.60 s. */
+	{
+		const uint32_t idx[] = {0u, 60u, 120u, 180u, 240u, 300u};
+		CHECK(gs_merge_step_count(idx, 6u, mg) == 3u, "merge: 0.6s train -> 3");
+		CHECK(close_abs(gs_walking_time_from_peaks(idx, 6u, cap, fs), 3.60f, 1e-4f),
+		      "walk: 0.6s train -> 3.60");
+	}
+	/* 0.9 s-spaced train (gap 90 >= 80) -> all kept. walk: 9×90=810 + mean 90 = 9.00 s. */
+	{
+		const uint32_t idx[] = {0u, 90u, 180u, 270u, 360u, 450u, 540u, 630u, 720u, 810u};
+		CHECK(gs_merge_step_count(idx, 10u, mg) == 10u, "merge: 0.9s train -> 10");
+		CHECK(close_abs(gs_walking_time_from_peaks(idx, 10u, cap, fs), 9.00f, 1e-4f),
+		      "walk: 0.9s train -> 9.00");
+	}
+	/* Two bouts with a 6.3 s pause (gap 630 > 250 cap, excluded). gated:
+	 * 6 gaps×90 = 540 + mean 90 = 6.30 s; merge keeps all 8 (all gaps >= 80). */
+	{
+		const uint32_t idx[] = {0u, 90u, 180u, 270u, 900u, 990u, 1080u, 1170u};
+		CHECK(gs_merge_step_count(idx, 8u, mg) == 8u, "merge: two-bout -> 8");
+		CHECK(close_abs(gs_walking_time_from_peaks(idx, 8u, cap, fs), 6.30f, 1e-4f),
+		      "walk: two-bout pause excluded -> 6.30");
+	}
+}
+
 static void test_pipeline(const struct test_fixture *fix, const char *name)
 {
 	printf("  [end-to-end pipeline]\n");
@@ -286,6 +330,56 @@ static void test_pipeline(const struct test_fixture *fix, const char *name)
 	      "%s: motion_duration_s %.4f differs from expected %.4f",
 	      name, (double)out.motion_duration_s,
 	      (double)fix->expected_motion_duration_s);
+
+	/* Decoupled step count + gait — validate the pipeline's new outputs
+	 * against an independent reference computed over the fixture's own peak
+	 * indices. (The pipeline's internal peaks may differ by ±1 sample from
+	 * the fixture peaks, which can rarely flip a merge decision at the gap
+	 * boundary — hence ±1 tolerance on the merged count.) */
+	{
+		static uint32_t pidx[GS_PIPELINE_MAX_PEAKS];
+		uint32_t np = fix->n_peaks < GS_PIPELINE_MAX_PEAKS
+			      ? fix->n_peaks : GS_PIPELINE_MAX_PEAKS;
+		for (uint32_t i = 0u; i < np; i++) {
+			pidx[i] = fix->peaks[i].sample_idx;
+		}
+		const uint32_t ref_merged =
+			gs_merge_step_count(pidx, np, GS_STEP_MERGE_GAP_SAMPLES);
+		const float ref_walk =
+			gs_walking_time_from_peaks(pidx, np, GS_STRIDE_GAP_CAP_SAMPLES,
+						   GS_FS_HZ);
+		printf("    steps_merged        got=%u  ref=%u  (raw=%u)\n",
+		       out.steps_merged, ref_merged, out.step_count);
+		printf("    walking_time_s      got=%.3f  ref=%.3f\n",
+		       (double)out.walking_time_s, (double)ref_walk);
+		printf("    gait_speed_fts      got=%.3f  valid=%d\n",
+		       (double)out.gait_speed_fts, out.gait_valid);
+
+		CHECK(out.steps_merged <= out.step_count,
+		      "%s: steps_merged %u > raw step_count %u",
+		      name, out.steps_merged, out.step_count);
+		CHECK(out.steps_merged + 1u >= ref_merged && ref_merged + 1u >= out.steps_merged,
+		      "%s: steps_merged %u vs ref %u (>±1)",
+		      name, out.steps_merged, ref_merged);
+		CHECK(close_abs(out.walking_time_s, ref_walk, 0.05f),
+		      "%s: walking_time_s %.4f vs ref %.4f",
+		      name, (double)out.walking_time_s, (double)ref_walk);
+		if (out.gait_valid) {
+			CHECK(out.steps_merged >= GS_GAIT_MIN_STEPS
+			      && out.walking_time_s >= GS_GAIT_MIN_WALK_S
+			      && out.distance_ft > 0.0f,
+			      "%s: gait_valid but guards not met", name);
+			CHECK(close_either(out.gait_speed_fts,
+					   out.distance_ft / out.walking_time_s,
+					   1e-3f, 1e-3f),
+			      "%s: gait_speed_fts %.4f != distance/walking_time",
+			      name, (double)out.gait_speed_fts);
+		} else {
+			CHECK(out.gait_speed_fts == 0.0f,
+			      "%s: gait invalid but speed %.4f != 0",
+			      name, (double)out.gait_speed_fts);
+		}
+	}
 }
 
 /* ----------------------------------------------------------------- */
@@ -330,6 +424,8 @@ int main(int argc, char **argv)
 		n = (int)(sizeof(defaults) / sizeof(defaults[0]));
 		paths = defaults;
 	}
+
+	test_gait_synthetic();
 
 	for (int i = 0; i < n; i++) {
 		if (run_one(paths[i]) != 0) {

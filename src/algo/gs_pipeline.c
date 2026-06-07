@@ -109,6 +109,56 @@ void gs_pipeline_step(struct gs_pipeline *p, float mag_g)
 	p->n_samples_processed++;
 }
 
+/* Reported step count: walk the emitted peak indices once, counting a peak
+ * as a step only if it is >= merge_gap_samples from the last KEPT step. This
+ * de-satellites the loose impulse detector (which fires ~2 impulses/step) for
+ * the *count only* — the distance regression still consumes every peak. Peak
+ * indices are monotonically increasing, so the unsigned subtraction is safe. */
+uint32_t gs_merge_step_count(const uint32_t *idx, uint32_t n,
+			     uint32_t merge_gap_samples)
+{
+	if (n == 0u) {
+		return 0u;
+	}
+	uint32_t kept = 1u;
+	uint32_t last = idx[0];
+	for (uint32_t i = 1u; i < n; i++) {
+		if (idx[i] - last >= merge_gap_samples) {
+			kept++;
+			last = idx[i];
+		}
+	}
+	return kept;
+}
+
+/* Gait denominator: sum the inter-peak gaps that are <= cap_samples (longer
+ * gaps are between-bout pauses, excluded), then add one MEAN gated gap for the
+ * leading partial stride the span omits. O(1) memory — no per-gap buffer.
+ * Returns seconds; 0 if there are fewer than 2 peaks or every gap exceeds the
+ * cap (isolated impulses → not walking). */
+float gs_walking_time_from_peaks(const uint32_t *idx, uint32_t n,
+				 uint32_t cap_samples, float fs_hz)
+{
+	if (n < 2u) {
+		return 0.0f;
+	}
+	uint64_t sum_gated = 0u;
+	uint32_t count = 0u;
+	for (uint32_t i = 1u; i < n; i++) {
+		const uint32_t gap = idx[i] - idx[i - 1u];
+		if (gap <= cap_samples) {
+			sum_gated += gap;
+			count++;
+		}
+	}
+	if (count == 0u) {
+		return 0.0f;
+	}
+	/* (count+1) strides' worth of time at the mean gated cadence. */
+	const double samples = (double)sum_gated + (double)sum_gated / (double)count;
+	return (float)(samples / (double)fs_hz);
+}
+
 void gs_pipeline_finalize(const struct gs_pipeline *p,
 			  struct gs_pipeline_outputs *out)
 {
@@ -151,4 +201,28 @@ void gs_pipeline_finalize(const struct gs_pipeline *p,
 		dist = 0.0;
 	}
 	out->distance_ft = (float)dist;
+
+	/* Decoupled step count + gait speed (post-process the emitted peak
+	 * train; distance above is untouched). peak_indices[] holds the first
+	 * min(n_peaks, MAX_PEAKS) emission sample indices. */
+	out->steps_merged = gs_merge_step_count(p->peak_indices, p->n_peaks,
+						GS_STEP_MERGE_GAP_SAMPLES);
+	out->walking_time_s = gs_walking_time_from_peaks(p->peak_indices, p->n_peaks,
+							 GS_STRIDE_GAP_CAP_SAMPLES,
+							 GS_FS_HZ);
+
+	out->gait_speed_fts = 0.0f;
+	out->gait_valid = false;
+	/* Long-session guard: if distance saturated (peak cap) or roughness
+	 * overflowed, the numerator is unreliable while walking-time keeps
+	 * growing → gait would falsely collapse. Omit. */
+	const bool not_saturated = !out->buffer_overflowed &&
+				   (p->n_peaks < GS_PIPELINE_MAX_PEAKS);
+	if (not_saturated &&
+	    out->steps_merged >= GS_GAIT_MIN_STEPS &&
+	    out->walking_time_s >= GS_GAIT_MIN_WALK_S &&
+	    out->distance_ft > 0.0f) {
+		out->gait_speed_fts = out->distance_ft / out->walking_time_s;
+		out->gait_valid = true;
+	}
 }

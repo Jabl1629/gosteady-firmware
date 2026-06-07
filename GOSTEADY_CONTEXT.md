@@ -226,7 +226,9 @@ IMU 100 Hz  →  |a|/g  →  HP 0.2 Hz  →  |a|_HP
 
 **Why step-based, not dead reckoning?** Dead reckoning gives 73 % MAPE — even 0.001 g of bias integrates to feet of phantom displacement. Fundamental MEMS limitation.
 
-**Output:** logged at session_stop on uart0 as `ALGO_V1A` + `ALGO_V1B` lines, also published to cloud as activity uplink (`distance_ft`, `steps`, `roughness_R`, `surface_class`, `active_min`).
+**Output:** logged at session_stop on uart0 as `ALGO_V1A` + `ALGO_V1B` + `ALGO_V1C` lines, also published to cloud as activity uplink (`distance_ft`, `steps`, `roughness_R`, `surface_class`, `active_min`, `gait_speed_fts`).
+
+**Decoupled step counter + gait speed (0.16.0-gait, 2026-06-07; spec `gosteady-portal/docs/specs/2026-06-07-gait-speed.md`, coord §C46).** The Schmitt detector is a loose *impulse* detector (~2 impulses/perceived step; "the regression absorbs the ratio" for distance), so its raw peak count over-counts steps ~1.5× (worst slow: live 53-vs-33). At finalize the reported `steps` is now the emitted peak train after a **0.8 s refractory merge** (`gs_merge_step_count`) — distance still consumes *every* peak, so it's untouched (still 22.4 % MAPE). `gait_speed_fts` = `distance_ft` / **peak-train walking time** (`gs_walking_time_from_peaks` — gated inter-peak gaps ≤ 2.5 s, not the exit-hold-inflated `motion_duration_s`), omitted (NaN) when merged steps < 5 / walking < 3 s / session saturated. `ALGO_V1A` now logs `steps=<merged> raw=<impulses>`; `ALGO_V1C` logs `walk_s`/`gait_fts`/`gait_valid`. Params in `gosteady_algo_params.h` (`GS_STEP_MERGE_GAP_*`, `GS_STRIDE_GAP_CAP_*`, `GS_GAIT_*`); algo version `0.7.0-algo-v1.1`. Host suite 55/55. Gait is a within-resident *trend*, not an absolute (inherits the distance MAPE floor).
 
 C port lives in `src/algo/`. Auto-generated coefficients header `src/algo/gosteady_algo_params.h` (regenerate via `algo/export_c_header.py`). Host regression suite `tests/host/` (31/31 passing).
 
@@ -322,8 +324,8 @@ Storage: AWS IoT Device Shadow `reported` state (no DDB row).
 
 ### Activity schema
 
-Required: `serial`, `session_start` (ISO 8601), `session_end` (ISO 8601), `steps` (0–100k), `distance_ft` (0–50k), `active_min` (0–1440).
-Optional: `roughness_R`, `surface_class` (`indoor`/`outdoor`), `firmware_version`.
+Required: `serial`, `session_start` (ISO 8601), `session_end` (ISO 8601), `steps` (0–100k; **de-satellited merged count as of 0.16.0-gait**), `distance_ft` (0–50k), `active_min` (0–1440).
+Optional: `roughness_R`, `surface_class` (`indoor`/`outdoor`), `firmware_version`, `gait_speed_fts` (ft/s, session-avg walking speed; omitted when on-device guards fail — 0.16.0-gait+).
 Idempotency: `(serial, session_end)`. Patient attribution: cloud-side via DeviceAssignment.
 
 ### Snippet schema (binary)

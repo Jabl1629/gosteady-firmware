@@ -645,15 +645,22 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 		} else {
 			snprintk(r_buf, sizeof(r_buf), "nan");
 		}
-		LOG_INF("ALGO_V1A uuid=%s distance_ft=%.2f R=%s surface=%u steps=%u",
+		/* steps = reported (de-satellited) count; raw = emitted impulse
+		 * count (the distance feature, kept for v1.5 step-counter retrain). */
+		LOG_INF("ALGO_V1A uuid=%s distance_ft=%.2f R=%s surface=%u steps=%u raw=%u",
 			uuid_str, (double)o->distance_ft, r_buf,
-			o->surface_class, o->step_count);
+			o->surface_class, o->steps_merged, o->step_count);
 		LOG_INF("ALGO_V1B uuid=%s motion_s=%.2f total_s=%.2f motion_frac=%.3f overflow=%u",
 			uuid_str,
 			(double)o->motion_duration_s,
 			(double)o->total_duration_s,
 			(double)o->motion_fraction,
 			o->buffer_overflowed ? 1u : 0u);
+		LOG_INF("ALGO_V1C uuid=%s walk_s=%.2f gait_fts=%.2f gait_valid=%u",
+			uuid_str,
+			(double)o->walking_time_s,
+			(double)o->gait_speed_fts,
+			o->gait_valid ? 1u : 0u);
 	} else {
 		LOG_WRN("ALGO_V1 uuid=%s no outputs (pipeline not seeded)", uuid_str);
 	}
@@ -684,8 +691,12 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 			LOG_WRN("session_stop: cellular UTC unavailable (%d) — activity session_end will be empty", end_err);
 			a.session_end_utc_iso[0] = '\0';
 		}
-		a.steps        = o->step_count;
+		a.steps        = o->steps_merged;   /* de-satellited count (raw impulses in ALGO_V1A log) */
 		a.distance_ft  = o->distance_ft;
+		/* Gait speed (ft/s). NaN when the on-device guards fail (too few
+		 * steps / too little walking time / saturated session) → JSON omits
+		 * the field, same as roughness_R. */
+		a.gait_speed_fts = o->gait_valid ? o->gait_speed_fts : (float)NAN;
 		/* active_min: round half-up from motion_duration_s/60. Cap at the
 		 * portal-contract max (1440 = 24 h) defensively; sessions are
 		 * normally minutes long so this only matters if something pinned

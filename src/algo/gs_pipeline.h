@@ -16,8 +16,10 @@
  * Inputs: |a|_g per sample (the caller computes
  * sqrt(ax² + ay² + az²) / 9.80665 from the BMI270 reading).
  *
- * Outputs (gs_pipeline_outputs): distance_ft, step_count, R, surface_class,
- * motion_duration_s, total_duration_s, motion_fraction.
+ * Outputs (gs_pipeline_outputs): distance_ft, step_count (raw peaks),
+ * steps_merged (reported, de-satellited), R, surface_class,
+ * motion_duration_s, total_duration_s, motion_fraction, walking_time_s,
+ * gait_speed_fts (+ gait_valid guard).
  *
  * Memory: dominated by the per-sample buffer used for batch inter-peak
  * RMS. Sized for GS_PIPELINE_MAX_BUFFERED_SAMPLES samples (default
@@ -56,12 +58,22 @@ struct gs_pipeline_outputs {
 	float    roughness_R;            /* NaN if < 10 samples passed the gate */
 	uint8_t  surface_class;          /* gs_surface_t value (0=indoor, 1=outdoor) */
 	uint8_t  _pad[3];
-	uint32_t step_count;
+	uint32_t step_count;             /* raw emitted peak count (distance feature N) */
 	float    motion_duration_s;
 	float    total_duration_s;
 	float    motion_fraction;
 	bool     buffer_overflowed;      /* true if session exceeded buffer; R is over the buffered prefix only */
 	uint8_t  _pad2[3];
+
+	/* Gait speed + decoupled step count — post-processed from the emitted
+	 * peak train at finalize; the distance/roughness/surface pipeline is
+	 * unchanged. See gosteady_algo_params.h GS_STEP_MERGE_* / GS_STRIDE_GAP_*
+	 * / GS_GAIT_*. */
+	uint32_t steps_merged;           /* reported step count: peaks after the refractory merge */
+	float    walking_time_s;         /* gait denominator: gated peak-train walking time (s); 0 if < 2 gated gaps */
+	float    gait_speed_fts;         /* distance_ft / walking_time_s, ft/s; 0 unless gait_valid */
+	bool     gait_valid;             /* true iff the gait guards passed (emit gait_speed_fts) */
+	uint8_t  _pad3[3];
 };
 
 struct gs_pipeline {
@@ -105,6 +117,20 @@ void gs_pipeline_step(struct gs_pipeline *p, float mag_g);
  * given the same accumulated state). */
 void gs_pipeline_finalize(const struct gs_pipeline *p,
 			  struct gs_pipeline_outputs *out);
+
+/* Reported (de-satellited) step count from an ascending peak sample-index
+ * array: a peak counts as a step only if it is >= merge_gap_samples from the
+ * last KEPT step. Decoupled from distance (which uses every peak). Exposed
+ * for unit testing + reuse. Mirrors algo/gait.py::merge_step_count. */
+uint32_t gs_merge_step_count(const uint32_t *peak_indices, uint32_t n_peaks,
+			     uint32_t merge_gap_samples);
+
+/* Peak-train walking time (seconds) — the gait denominator. Sums inter-peak
+ * gaps <= cap_samples (longer gaps are between-bout pauses) + one mean gated
+ * gap for the leading partial stride. 0 if < 2 peaks or all gaps exceed the
+ * cap. Mirrors algo/gait.py::walking_time_s. */
+float gs_walking_time_from_peaks(const uint32_t *peak_indices, uint32_t n_peaks,
+				 uint32_t cap_samples, float fs_hz);
 
 #ifdef __cplusplus
 }
