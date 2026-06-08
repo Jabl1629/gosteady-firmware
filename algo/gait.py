@@ -69,7 +69,11 @@ def gait_speed_fts(distance_ft: float,
     (too few steps / too little walking time / saturated session)."""
     steps = merge_step_count(peak_sample_indices, merge_gap_samples)
     wt = walking_time_s(peak_sample_indices, fs_hz, cap_samples)
-    if (buffer_overflowed or n_peaks_at_cap
+    # buffer_overflowed (>120 s) only affects roughness/surface, not distance
+    # or walking-time, so it does NOT suppress gait (0.16.1-gait). Only the
+    # 512-peak cap (n_peaks_at_cap) truncates the distance numerator.
+    del buffer_overflowed  # accepted for signature compat; intentionally unused
+    if (n_peaks_at_cap
             or steps < min_steps or wt < min_walk_s or distance_ft <= 0.0):
         return None
     return distance_ft / wt

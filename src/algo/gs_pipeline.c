@@ -213,11 +213,14 @@ void gs_pipeline_finalize(const struct gs_pipeline *p,
 
 	out->gait_speed_fts = 0.0f;
 	out->gait_valid = false;
-	/* Long-session guard: if distance saturated (peak cap) or roughness
-	 * overflowed, the numerator is unreliable while walking-time keeps
-	 * growing → gait would falsely collapse. Omit. */
-	const bool not_saturated = !out->buffer_overflowed &&
-				   (p->n_peaks < GS_PIPELINE_MAX_PEAKS);
+	/* Long-session guard: suppress gait only when the DISTANCE numerator is
+	 * genuinely truncated — i.e. the per-peak accumulators hit the 512-peak
+	 * cap. buffer_overflowed (session > 120 s) only means roughness/surface
+	 * was computed over the buffered prefix; distance (per-peak, up to the
+	 * cap) and walking-time (peak-train) remain valid, so a 2-min hallway
+	 * walk must KEEP its gait. (Surface from the first 2 min is treated as
+	 * representative of the whole walk.) */
+	const bool not_saturated = (p->n_peaks < GS_PIPELINE_MAX_PEAKS);
 	if (not_saturated &&
 	    out->steps_merged >= GS_GAIT_MIN_STEPS &&
 	    out->walking_time_s >= GS_GAIT_MIN_WALK_S &&

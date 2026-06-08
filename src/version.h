@@ -138,6 +138,13 @@
  *                    / walking<3 s / session saturated). `steps` sharpens ~30%;
  *                    split cloud cohorts on firmware_version. Per-config suffix
  *                    (wakewindow/pilot/psm) preserved.
+ *   0.16.1-gait      Gait long-session guard relaxed: suppress gait only on the
+ *                    512-peak cap (distance genuinely truncated), NOT on the
+ *                    120 s roughness-buffer overflow. buffer_overflowed only
+ *                    affects surface classification; distance + walking-time
+ *                    stay valid, so a 2-min+ hallway walk now keeps its gait
+ *                    (previously dropped — observed on GS0000000001's 92-step
+ *                    walk). gs_pipeline.c only; no contract change.
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -149,11 +156,11 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.16.0-gait-wakewindow"
+#define GS_FIRMWARE_VERSION_STR "0.16.1-gait-wakewindow"
 #elif defined(CONFIG_GOSTEADY_LOW_POWER)
-#define GS_FIRMWARE_VERSION_STR "0.16.0-gait-pilot"
+#define GS_FIRMWARE_VERSION_STR "0.16.1-gait-pilot"
 #else
-#define GS_FIRMWARE_VERSION_STR "0.16.0-gait-psm"
+#define GS_FIRMWARE_VERSION_STR "0.16.1-gait-psm"
 #endif
 
 #endif /* GOSTEADY_VERSION_H_ */
