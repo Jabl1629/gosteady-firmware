@@ -82,8 +82,12 @@ static struct mqtt_topic s_app_topics[1];
  * firmware + uptime_s + last_cmd_id (≤47) + reset_reason (≤64) +
  * fault_counters object + watchdog_hits + structural overhead. ~360 B max
  * observed; 512 B leaves comfortable headroom for future schema additions. */
-#define HEARTBEAT_PAYLOAD_MAX 512
-#define ACTIVITY_PAYLOAD_MAX  384
+/* Bumped 512 -> 640: the 0.17.0-time clock_synced + time_source fields (~47
+ * chars) push the all-extras heartbeat close to the old 512 cap. */
+#define HEARTBEAT_PAYLOAD_MAX 640
+/* Bumped 384 -> 640 for the 0.17.0-time fields (clock_synced + 3 uptime_ms +
+ * boot_count + time_source ≈ 180 extra chars worst-case). */
+#define ACTIVITY_PAYLOAD_MAX  640
 
 /* M12.1c.2 hourly cadence + linear-backoff retry on the same wake. */
 #define HEARTBEAT_INTERVAL    K_SECONDS(60 * 60)
@@ -756,20 +760,26 @@ static int drain_one_snippet(void)
 
 static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 {
-	char ts[32];
-	int err = gosteady_cellular_get_network_time(ts, sizeof(ts));
-	if (err) {
-		LOG_ERR("get_network_time: %d", err);
-		return err;
-	}
-
+	/* Signal is required (cloud rejects without rsrp/snr); bail if the
+	 * reporter hasn't primed a reading yet. */
 	int16_t rsrp_dbm = 0;
 	int8_t  snr_db   = 0;
-	err = gosteady_cellular_get_signal(&rsrp_dbm, &snr_db);
+	int err = gosteady_cellular_get_signal(&rsrp_dbm, &snr_db);
 	if (err) {
 		LOG_ERR("get_signal: %d", err);
 		return err;
 	}
+
+	/* 0.17.0-time (spec §6 / Open-Q4): time is OPTIONAL for liveness. If the
+	 * clock is synced, include a real `ts`. If not (no NITZ and NTP not yet
+	 * obtained), publish anyway with clock_synced=false and OMIT `ts` — never
+	 * block the heartbeat on time, and never put an implausible (2080) ts on
+	 * the wire. The cloud stamps its trusted receive time for lastSeen when
+	 * clock_synced=false (cloud-side follow-up). In practice the clock is
+	 * almost always synced by the time we connect (SNTP runs over this link). */
+	char ts[32];
+	bool clock_synced = (gosteady_cellular_get_network_time(ts, sizeof(ts)) == 0);
+	const char *time_source = gosteady_cellular_time_source();
 
 	/* Battery readings: M10.7.2 fuel gauge if compiled in, else the
 	 * placeholder from M12.1c.1. The getter returns 0/0.5 placeholder
@@ -787,15 +797,9 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 	}
 #endif
 
-	int n = snprintf(buf, buflen,
-		"{\"serial\":\"%s\","
-		 "\"ts\":\"%s\","
-		 "\"battery_pct\":%.3f,"
-		 "\"rsrp_dbm\":%d,"
-		 "\"snr_db\":%d",
-		client_id(), ts, (double)battery_pct, (int)rsrp_dbm, (int)snr_db);
+	int n = snprintf(buf, buflen, "{\"serial\":\"%s\"", client_id());
 	if (n < 0 || (size_t)n >= buflen) {
-		LOG_ERR("heartbeat truncated (required block): n=%d buflen=%u",
+		LOG_ERR("heartbeat truncated (serial): n=%d buflen=%u",
 			n, (unsigned)buflen);
 		return -ENOMEM;
 	}
@@ -808,6 +812,17 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 		}                                                     \
 		n += m;                                               \
 	} while (0)
+
+	/* ts only when the clock is synced (else omit — cloud uses ingest time). */
+	if (clock_synced) {
+		APPEND_OR_FAIL(",\"ts\":\"%s\"", ts);
+	}
+
+	/* Required numeric block + the time-reliability flags. */
+	APPEND_OR_FAIL(",\"battery_pct\":%.3f,\"rsrp_dbm\":%d,\"snr_db\":%d",
+		       (double)battery_pct, (int)rsrp_dbm, (int)snr_db);
+	APPEND_OR_FAIL(",\"clock_synced\":%s", clock_synced ? "true" : "false");
+	APPEND_OR_FAIL(",\"time_source\":\"%s\"", time_source);
 
 	/* battery_mv: only when fuel gauge produced a real reading. */
 	if (battery_mv > 0) {
@@ -1052,6 +1067,38 @@ static int build_activity_payload(const struct gosteady_activity *a,
 		return -ENOMEM;
 	}
 
+	/* 0.17.0-time (device-time-reliability spec §5). Always-present
+	 * timestamp-reliability fields: clock_synced flags whether the ISO
+	 * session_start/_end above are trustworthy; the uptimes + boot_count let
+	 * the cloud reconstruct absolute times from its trusted receive time when
+	 * clock_synced=false (the never-drop guarantee, §4.3). The cloud's
+	 * accept-all contract tolerates these on old cloud (they land in `extras`)
+	 * until the activity-processor consumes them. */
+	{
+		int m = snprintf(buf + n, buflen - (size_t)n,
+			",\"clock_synced\":%s"
+			",\"session_start_uptime_ms\":%u"
+			",\"session_end_uptime_ms\":%u"
+			",\"publish_uptime_ms\":%u"
+			",\"boot_count\":%u",
+			a->clock_synced ? "true" : "false",
+			(unsigned)a->session_start_uptime_ms,
+			(unsigned)a->session_end_uptime_ms,
+			(unsigned)a->publish_uptime_ms,
+			(unsigned)a->boot_count);
+		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
+		n += m;
+	}
+
+	/* time_source: observability ("nitz"|"ntp"|"unsynced"). Static literal
+	 * from gosteady_cellular_time_source(); NULL/empty => omit. */
+	if (a->time_source != NULL && a->time_source[0] != '\0') {
+		int m = snprintf(buf + n, buflen - (size_t)n,
+				 ",\"time_source\":\"%s\"", a->time_source);
+		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
+		n += m;
+	}
+
 	if (isfinite((double)a->roughness_R)) {
 		int m = snprintf(buf + n, buflen - (size_t)n,
 				 ",\"roughness_R\":%.4f", (double)a->roughness_R);
@@ -1116,59 +1163,56 @@ static void activity_worker_thread_fn(void *p1, void *p2, void *p3)
 			a.session_end_utc_iso, (unsigned)a.steps, (double)a.distance_ft,
 			(a.retry_count > 0) ? " (retry)" : "");
 
-		/* FMEA 1.1+1.2 (2026-05-10): retro-stamp empty session_start /
-		 * session_end ISO strings using uptime deltas + current cellular
-		 * UTC. Handles cold-boot-mid-motion (cellular not yet attached
-		 * at session_start) and cellular-flap-mid-session (cellular not
-		 * attached at session_stop). connect_publish_disconnect below
-		 * waits for cellular ready, but its wait happens AFTER payload
-		 * build; we need the strings populated BEFORE build_activity_
-		 * payload, so do an explicit cellular check here. If cellular
-		 * is still unavailable, leave empty and the publish-side cloud
-		 * validator will reject — but the FMEA 1.3 retry path will
-		 * pick it back up. */
-		if ((a.session_start_utc_iso[0] == '\0' && a.session_start_uptime_ms != 0) ||
-		    (a.session_end_utc_iso[0] == '\0'   && a.session_end_uptime_ms != 0)) {
-			int64_t now_unix_ms = 0;
-			int t_err = gosteady_cellular_get_network_time_unix_ms(&now_unix_ms);
-			if (t_err == 0) {
-				uint32_t now_uptime = k_uptime_get_32();
-				if (a.session_start_utc_iso[0] == '\0' &&
-				    a.session_start_uptime_ms != 0) {
-					int64_t delta_ms = (int64_t)(now_uptime - a.session_start_uptime_ms);
-					int64_t start_unix = now_unix_ms - delta_ms;
-					int frc = gosteady_cellular_format_unix_ms_iso8601(
-						start_unix,
-						a.session_start_utc_iso,
+		/* 0.17.0-time (device-time-reliability spec §4.2/§4.3): resolve
+		 * session_start/_end ISO + the time-reliability flags just before
+		 * publish. Supersedes the FMEA 1.1/1.2 "retro-stamp empty ISO from
+		 * cellular UTC + uptime delta" block — same idea, but anchored to
+		 * the date_time lib (NTP-backed when NITZ is absent), which is the
+		 * actual fix for the Jun 14-16 2080 incident.
+		 *
+		 * publish_uptime is the anchor the cloud uses for its age-delta
+		 * reconstruction; capture it once here. If the clock is synced,
+		 * re-resolve BOTH ends from their stored uptimes via the
+		 * date_time-anchored conversion (one consistent reference for both
+		 * ends) — this overrides any ISO stamped at session_start/stop. If
+		 * the clock is NOT synced, leave the ISO empty + clock_synced=false
+		 * so the cloud reconstructs from its trusted receive time (never
+		 * drop, §4.3). */
+		a.publish_uptime_ms = k_uptime_get_32();
+		a.time_source = gosteady_cellular_time_source();
+		if (gosteady_cellular_clock_is_synced()) {
+			a.clock_synced = true;
+			if (a.session_start_uptime_ms != 0) {
+				int64_t s_ms = 0;
+				if (gosteady_cellular_uptime_to_unix_ms(
+					    a.session_start_uptime_ms, &s_ms) == 0) {
+					(void)gosteady_cellular_format_unix_ms_iso8601(
+						s_ms, a.session_start_utc_iso,
 						sizeof(a.session_start_utc_iso));
-					if (frc == 0) {
-						LOG_INF("activity: retro-stamped session_start from uptime → %s (delta_ms=%lld)",
-							a.session_start_utc_iso,
-							(long long)delta_ms);
-					} else {
-						LOG_WRN("activity: format_unix_ms failed for session_start (%d)", frc);
-					}
 				}
-				if (a.session_end_utc_iso[0] == '\0' &&
-				    a.session_end_uptime_ms != 0) {
-					int64_t delta_ms = (int64_t)(now_uptime - a.session_end_uptime_ms);
-					int64_t end_unix = now_unix_ms - delta_ms;
-					int frc = gosteady_cellular_format_unix_ms_iso8601(
-						end_unix,
-						a.session_end_utc_iso,
-						sizeof(a.session_end_utc_iso));
-					if (frc == 0) {
-						LOG_INF("activity: retro-stamped session_end from uptime → %s (delta_ms=%lld)",
-							a.session_end_utc_iso,
-							(long long)delta_ms);
-					} else {
-						LOG_WRN("activity: format_unix_ms failed for session_end (%d)", frc);
-					}
-				}
-			} else {
-				LOG_WRN("activity: cellular UTC unavailable (%d) — publish will have empty timestamp(s); FMEA 1.3 retry will re-attempt",
-					t_err);
 			}
+			if (a.session_end_uptime_ms != 0) {
+				int64_t e_ms = 0;
+				if (gosteady_cellular_uptime_to_unix_ms(
+					    a.session_end_uptime_ms, &e_ms) == 0) {
+					(void)gosteady_cellular_format_unix_ms_iso8601(
+						e_ms, a.session_end_utc_iso,
+						sizeof(a.session_end_utc_iso));
+				}
+			}
+			LOG_INF("activity: clock synced (src=%s) — start=%s end=%s",
+				a.time_source,
+				a.session_start_utc_iso[0] ? a.session_start_utc_iso : "(empty)",
+				a.session_end_utc_iso[0] ? a.session_end_utc_iso : "(empty)");
+		} else {
+			a.clock_synced = false;
+			a.session_start_utc_iso[0] = '\0';
+			a.session_end_utc_iso[0] = '\0';
+			LOG_WRN("activity: clock unsynced — clock_synced=false; cloud reconstructs from ingest time (uptimes start=%u end=%u publish=%u boot=%u)",
+				(unsigned)a.session_start_uptime_ms,
+				(unsigned)a.session_end_uptime_ms,
+				(unsigned)a.publish_uptime_ms,
+				(unsigned)a.boot_count);
 		}
 
 		char payload[ACTIVITY_PAYLOAD_MAX];

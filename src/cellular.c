@@ -18,15 +18,15 @@
  */
 
 #include "cellular.h"
+#include "gs_time.h"
 
 #include <stdio.h>
 #include <time.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/atomic.h>
-#include <zephyr/sys/timeutil.h>
 
+#include <date_time.h>
 #include <modem/lte_lc.h>
 #include <modem/nrf_modem_lib.h>
 #include <nrf_modem_at.h>
@@ -92,122 +92,53 @@ static const char *mode_str(enum lte_lc_lte_mode m)
 	}
 }
 
-/* ---- Bounded-timeout AT command wrapper (firmware-coord §C11.5) ----
+/* ---- Absolute time via NCS date_time library (0.17.0-time) ----
  *
- * Background:
- *   Under sustained modem contention (e.g. an exhausted SIM driving a
- *   tight PDN-reject reattach loop), `nrf_modem_at_scanf` / `_at_cmd`
- *   block synchronously past the 60 s WDT envelope, killing the caller
- *   thread. The 2026-05-11/12 conference produced this failure mode
- *   end-to-end (1 watchdog + 1 fatal + 3 reboots; coord §C11.2/§C11.4).
- *   §C10.5 had predicted it six days earlier as the "M14.5 watch item".
+ * Replaces the bespoke AT+CCLK? read (and the §C11.5 bounded-timeout AT
+ * wrapper that guarded it) with the NCS `date_time` lib, which sources UTC
+ * in priority NITZ -> NTP -> app-set and maintains it against the monotonic
+ * clock. Two properties drive the rewrite:
  *
- * Design:
- *   A dedicated worker thread runs the (blocking) `nrf_modem_at_cmd`.
- *   Callers post the command via `at_request_sem` and wait for the
- *   response on `at_response_sem` with a bounded timeout. If the
- *   timeout fires, the caller returns `-ETIMEDOUT`; the worker may
- *   continue blocking until the modem eventually responds, but the
- *   caller's thread (often main.c's auto-start coordinator) is freed.
+ *   1. date_time's modem source is the %XTIME *NITZ push* notification (via
+ *      AT_MONITOR), NOT a poll of the free-running modem RTC. So on a roaming
+ *      SIM that broadcasts no NITZ it never emits the 1980/2080 default — it
+ *      falls through to NTP. This is the actual fix for the Jun 14-16 2080
+ *      incident (coord §C47).
+ *   2. date_time_now() / date_time_uptime_to_unix_time_ms() are cached RAM
+ *      reads — no modem round-trip — so the session-start hot path no longer
+ *      needs the bounded-timeout AT wrapper at all. Deleting that apparatus
+ *      (two sems + mutex + seq atomics + the reporter-thread dispatch loop)
+ *      both reclaims RAM to offset date_time's ~1.3 KB thread + SNTP socket
+ *      and *eliminates* (not just bounds) the §C11.5 AT-serialization lockup
+ *      for the time path.
  *
- *   `session_start`'s callers translate `-ETIMEDOUT` to `-EAGAIN` so
- *   the existing FMEA 1.1 retro-stamp path picks up cleanly — session
- *   opens with `start_utc=unavailable`, the timestamp is filled in at
- *   `session_stop` (or by the activity worker's republish path).
- *
- * Race handling:
- *   A monotonic request sequence number is stamped per call. The
- *   worker writes the sequence back into `at_response_seq` after the
- *   AT call returns. Callers compare on wake: if the sequence doesn't
- *   match, they got a stale response from a prior timed-out caller and
- *   return `-ETIMEDOUT` themselves. The caller-side mutex serializes
- *   wrapper invocations; the `at_request_sem` has max=1 so concurrent
- *   `give()` calls collapse safely (the worker will service the most-
- *   recent in-flight cmd, and stale responses are filtered by seq).
- *
- * Timeout choice:
- *   2000 ms — far below the 60 s WDT envelope, comfortably above the
- *   typical AT round-trip time (<100 ms per §C10.5 bench observation).
+ * read_signal() (AT+CESQ / AT%XSNRSQ) still uses the bare synchronous
+ * nrf_modem_at_scanf — it runs on the reporter thread, never in session_start.
  */
 
-#define AT_DEFAULT_TIMEOUT_MS     2000
-#define AT_RESPONSE_BUF_SIZE      128
+enum gs_time_src { GS_TIME_SRC_UNSYNCED = 0, GS_TIME_SRC_NITZ, GS_TIME_SRC_NTP };
+static volatile enum gs_time_src s_time_source = GS_TIME_SRC_UNSYNCED;
 
-/* Dispatch slots — the at worker runs INSIDE the reporter thread to avoid
- * adding a second 2 KB stack (RAM was already at 99.76% pre-patch per
- * coord §C10.6). The reporter's main loop polls at_request_sem with a
- * timeout: on sem fire, run the AT cmd; on timeout, do the periodic
- * signal+time poll. AT cmds get priority — periodic poll runs whenever
- * the reporter is otherwise idle. */
-static K_SEM_DEFINE(at_request_sem, 0, 1);
-static K_SEM_DEFINE(at_response_sem, 0, 1);
-static K_MUTEX_DEFINE(at_caller_mutex);
-
-static atomic_t at_request_seq  = ATOMIC_INIT(0);
-static atomic_t at_response_seq = ATOMIC_INIT(0);
-
-static const char *at_pending_cmd;
-static int         at_pending_result;
-static char        at_pending_response[AT_RESPONSE_BUF_SIZE];
-
-/* Called by reporter_entry when at_request_sem fires. Runs in the reporter
- * thread context (its 2 KB stack is plenty for nrf_modem_at_cmd). */
-static void at_worker_service_one(void)
+static void date_time_evt_handler(const struct date_time_evt *evt)
 {
-	atomic_val_t my_seq = atomic_get(&at_request_seq);
-	int64_t t0 = k_uptime_get();
-	at_pending_result = nrf_modem_at_cmd(at_pending_response,
-					      sizeof(at_pending_response),
-					      "%s", at_pending_cmd);
-	int64_t elapsed = k_uptime_get() - t0;
-	atomic_set(&at_response_seq, my_seq);
-	if (elapsed > AT_DEFAULT_TIMEOUT_MS) {
-		LOG_WRN("at cmd '%s' took %lld ms (>timeout); caller may have given up",
-			at_pending_cmd, elapsed);
+	switch (evt->type) {
+	case DATE_TIME_OBTAINED_MODEM:
+		s_time_source = GS_TIME_SRC_NITZ;
+		LOG_INF("date_time: obtained from modem (NITZ)");
+		break;
+	case DATE_TIME_OBTAINED_NTP:
+		s_time_source = GS_TIME_SRC_NTP;
+		LOG_INF("date_time: obtained from NTP");
+		break;
+	case DATE_TIME_OBTAINED_EXT:
+		LOG_INF("date_time: obtained from external source");
+		break;
+	case DATE_TIME_NOT_OBTAINED:
+		LOG_WRN("date_time: update did not obtain a valid time");
+		break;
+	default:
+		break;
 	}
-	k_sem_give(&at_response_sem);
-}
-
-/* Synchronous AT command with bounded caller-side wait.
- * Returns nrf_modem_at_cmd's result on success; -ETIMEDOUT if the modem
- * doesn't respond within timeout_ms; -EINVAL on bad args.
- */
-static int at_cmd_with_timeout(const char *cmd, char *out, size_t outlen,
-			       int timeout_ms)
-{
-	if (!cmd || !out || outlen == 0) {
-		return -EINVAL;
-	}
-
-	k_mutex_lock(&at_caller_mutex, K_FOREVER);
-
-	atomic_val_t my_seq = atomic_inc(&at_request_seq) + 1;
-	at_pending_cmd = cmd;
-	k_sem_reset(&at_response_sem);   /* drop any stale give from a prior caller */
-	k_sem_give(&at_request_sem);     /* wake worker */
-
-	int err = k_sem_take(&at_response_sem, K_MSEC(timeout_ms));
-	if (err == -EAGAIN) {
-		LOG_WRN("at cmd timed out after %d ms (modem contention?): %s",
-			timeout_ms, cmd);
-		k_mutex_unlock(&at_caller_mutex);
-		return -ETIMEDOUT;
-	}
-
-	if (atomic_get(&at_response_seq) != my_seq) {
-		LOG_WRN("at cmd: stale response (got seq %ld, wanted %ld); treating as timeout: %s",
-			(long)atomic_get(&at_response_seq), (long)my_seq, cmd);
-		k_mutex_unlock(&at_caller_mutex);
-		return -ETIMEDOUT;
-	}
-
-	int rc = at_pending_result;
-	if (rc >= 0) {
-		strncpy(out, at_pending_response, outlen - 1);
-		out[outlen - 1] = '\0';
-	}
-	k_mutex_unlock(&at_caller_mutex);
-	return rc;
 }
 
 /* Read AT+CESQ for RSRP/SNR. AT+CESQ returns:
@@ -218,11 +149,11 @@ static int at_cmd_with_timeout(const char *cmd, char *out, size_t outlen,
  *   97    => RSRP >= -44 dBm
  *   255   => not known
  *
- * Note: read_signal runs on the cellular reporter thread (line ~240),
- * not in session_start's critical path, so the synchronous bare
- * nrf_modem_at_scanf here is acceptable. session_start's CCLK calls
- * use at_cmd_with_timeout() — see read_network_time_iso8601() and
- * gosteady_cellular_get_network_time_unix_ms() below.
+ * Note: read_signal runs on the cellular reporter thread, not in
+ * session_start's critical path, so the synchronous bare
+ * nrf_modem_at_scanf here is acceptable. Absolute time no longer touches
+ * the modem at all (it comes from the date_time lib cache — see the time
+ * accessors below).
  */
 static int read_signal(int16_t *rsrp_dbm, int8_t *snr_db)
 {
@@ -266,74 +197,6 @@ static int read_signal(int16_t *rsrp_dbm, int8_t *snr_db)
 		*snr_db = INT8_MIN;
 	}
 
-	return 0;
-}
-
-/* Bare AT+CCLK? read — no wrapper, used by the reporter thread itself
- * (calling at_cmd_with_timeout from the reporter would self-deadlock:
- * the wrapper gives at_request_sem, which only the reporter consumes,
- * but the reporter is blocked waiting on at_response_sem). */
-static int read_network_time_iso8601_bare(char *out, size_t outlen)
-{
-	if (outlen < 24) {
-		return -EINVAL;
-	}
-
-	int year, month, day, hour, minute, second, tz;
-	int err = nrf_modem_at_scanf("AT+CCLK?",
-		"+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
-		&year, &month, &day, &hour, &minute, &second, &tz);
-	if (err < 0) {
-		return -EIO;
-	}
-	if (err < 7) {
-		return -EAGAIN;
-	}
-
-	(void)snprintf(out, outlen, "20%02d-%02d-%02dT%02d:%02d:%02dZ",
-		year, month, day, hour, minute, second);
-	return 0;
-}
-
-static int read_network_time_iso8601(char *out, size_t outlen)
-{
-	if (outlen < 24) {
-		return -EINVAL;
-	}
-
-	/* §C11.5: bounded-timeout AT call. -ETIMEDOUT under modem contention
-	 * becomes -EAGAIN to the caller (session.c treats -EAGAIN as
-	 * "cellular UTC unavailable, FMEA 1.1 retro-stamp will re-attempt"). */
-	char resp[64];
-	int err = at_cmd_with_timeout("AT+CCLK?", resp, sizeof(resp),
-				       AT_DEFAULT_TIMEOUT_MS);
-	if (err == -ETIMEDOUT) {
-		return -EAGAIN;
-	}
-	if (err < 0) {
-		return -EIO;
-	}
-
-	/* +CCLK: "yy/MM/dd,hh:mm:ss±zz"
-	 *   yy/MM/dd  : 2-digit year, month, day (UTC after timezone correction)
-	 *   ±zz       : timezone in 15-minute units; +00 => already UTC
-	 * Modem normally reports UTC with +00 once it receives NITZ from the
-	 * network, which is what we'll see at the bench.
-	 */
-	int year, month, day, hour, minute, second, tz;
-	int n = sscanf(resp, "+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
-		       &year, &month, &day, &hour, &minute, &second, &tz);
-	if (n < 7) {
-		/* Modem hasn't received NITZ yet. */
-		return -EAGAIN;
-	}
-
-	/* Format as ISO 8601 in UTC. We don't apply tz here — at the bench
-	 * the network gives us +00 anyway, and v1 is okay with seconds-level
-	 * accuracy. If a deployment cell ever returns a non-zero tz we'd
-	 * want to convert rather than just truncate. */
-	(void)snprintf(out, outlen, "20%02d-%02d-%02dT%02d:%02d:%02dZ",
-		year, month, day, hour, minute, second);
 	return 0;
 }
 
@@ -399,15 +262,17 @@ static void log_signal_and_time(void)
 		LOG_WRN("signal read failed (%d)", err);
 	}
 
-	char ts[32];
-	/* Reporter calls bare (no wrapper) — see read_network_time_iso8601_bare. */
-	err = read_network_time_iso8601_bare(ts, sizeof(ts));
-	if (err == 0) {
-		LOG_INF("network_time=%s", ts);
-	} else if (err == -EAGAIN) {
-		LOG_INF("network_time=unsynced (no NITZ yet)");
+	/* Informational time log from the date_time cache (no modem round-trip). */
+	int64_t now_ms = 0;
+	if (gosteady_cellular_get_network_time_unix_ms(&now_ms) == 0) {
+		char ts[32];
+		if (gosteady_cellular_format_unix_ms_iso8601(now_ms, ts,
+							      sizeof(ts)) == 0) {
+			LOG_INF("network_time=%s (src=%s)", ts,
+				gosteady_cellular_time_source());
+		}
 	} else {
-		LOG_WRN("network_time read failed (%d)", err);
+		LOG_INF("network_time=unsynced (no NITZ/NTP yet)");
 	}
 }
 
@@ -415,55 +280,31 @@ static void reporter_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
 
-	LOG_INF("at_worker servicing on reporter thread (default timeout=%d ms)",
-		AT_DEFAULT_TIMEOUT_MS);
-
-	/* Block until first registration. Callers of at_cmd_with_timeout
-	 * gate on s_registered, so no AT requests are expected before this
-	 * point — and if any sneak in, they'll just time out (safe). */
+	/* Block until first registration. */
 	(void)k_sem_take(&registered_sem, K_FOREVER);
-	LOG_INF("registered — first signal/time poll in 5 s "
-		"(servicing AT requests during settle)");
-	/* Settle period for NITZ arrival before our own time poll. Service
-	 * AT requests during the wait — otherwise gs_cloud's immediate
-	 * post-registration AT+CCLK? gets stuck for ~2.5 s and the
-	 * at_cmd_with_timeout wrapper logs a spurious "modem contention?"
-	 * warning even on healthy cellular. */
-	int64_t settle_deadline = k_uptime_get() + 5000;
-	while (k_uptime_get() < settle_deadline) {
-		int wait_ms = (int)(settle_deadline - k_uptime_get());
-		if (wait_ms <= 0) break;
-		int err = k_sem_take(&at_request_sem, K_MSEC(wait_ms));
-		if (err == 0) at_worker_service_one();
+
+	/* Settle briefly for the modem %XTIME (NITZ) push, then explicitly kick
+	 * a date_time update. DATE_TIME_AUTO_UPDATE also fires on the LTE link
+	 * event, but the explicit kick guarantees an NTP attempt now that the
+	 * data link is up — this is what saves the no-NITZ roaming case (the
+	 * %XTIME notification may never arrive). Runs on the date_time lib's own
+	 * thread; results arrive via date_time_evt_handler. */
+	LOG_INF("registered — settling 5 s, then date_time update + first signal poll");
+	k_sleep(K_MSEC(5000));
+	int derr = date_time_update_async(date_time_evt_handler);
+	if (derr) {
+		LOG_WRN("date_time_update_async kick failed (%d) — auto-update still active",
+			derr);
 	}
 
-	/* Main loop: interleave periodic signal+time poll with AT-cmd
-	 * dispatch. Poll-due check happens at the TOP of every iteration so
-	 * continuous AT request traffic (which gs_cloud generates during
-	 * post-registration setup) cannot starve the periodic poll. Without
-	 * this, log_signal_and_time() never runs, gs_cloud's signal-stats
-	 * wait never succeeds, and the heartbeat thread gives up after 60 s
-	 * with "cellular never became ready". */
-	int64_t next_poll_ms = k_uptime_get();   /* fire poll immediately on entry */
+	/* Periodic signal+time poll for the bring-up/diagnostics log. No AT-cmd
+	 * dispatch any more — absolute time comes from the date_time cache and
+	 * read_signal's AT+CESQ is a bare synchronous call on this thread. */
 	while (1) {
-		int64_t now = k_uptime_get();
-
-		/* (a) Fire periodic poll if due. */
-		if (now >= next_poll_ms && s_registered) {
+		if (s_registered) {
 			log_signal_and_time();
-			next_poll_ms = k_uptime_get() + REPORTER_PERIOD_MS;
-			continue;
 		}
-
-		/* (b) Wait for either an AT request OR until the next poll
-		 * is due, whichever fires first. */
-		int wait_ms = (int)(next_poll_ms - now);
-		if (wait_ms < 0) wait_ms = 0;
-		int err = k_sem_take(&at_request_sem, K_MSEC(wait_ms));
-		if (err == 0) {
-			at_worker_service_one();
-			/* loop back to (a) — may now be poll-due */
-		}
+		k_sleep(K_MSEC(REPORTER_PERIOD_MS));
 	}
 }
 
@@ -489,18 +330,17 @@ int gosteady_cellular_start(void)
 	}
 	LOG_INF("lte_lc_connect_async kicked off — waiting for registration");
 
+	/* 0.17.0-time: register the date_time handler so we learn which source
+	 * (NITZ/NTP) supplied the clock. DATE_TIME_AUTO_UPDATE drives the first
+	 * update when LTE attaches; the reporter thread also kicks an explicit
+	 * update once registered (see reporter_entry). */
+	date_time_register_handler(date_time_evt_handler);
+
 	k_thread_create(&reporter_thread, reporter_stack,
 		K_THREAD_STACK_SIZEOF(reporter_stack),
 		reporter_entry, NULL, NULL, NULL,
 		7, 0, K_NO_WAIT);
 	k_thread_name_set(&reporter_thread, "cell_reporter");
-	/* §C11.5: the reporter thread now also services bounded-timeout AT
-	 * cmd dispatch from at_cmd_with_timeout(). One thread does both
-	 * jobs because RAM was already at 99.76% pre-patch (coord §C10.6),
-	 * so adding a second dedicated AT worker thread overflowed the
-	 * region by ~2 KB. Folding into reporter saves the second 2 KB
-	 * stack + k_thread struct. AT cmds are prioritized over the
-	 * informational signal/time poll. */
 
 	s_started = true;
 	return 0;
@@ -524,65 +364,80 @@ int gosteady_cellular_get_signal(int16_t *rsrp_dbm, int8_t *snr_db)
 	return 0;
 }
 
-int gosteady_cellular_get_network_time(char *buf, size_t buflen)
-{
-	if (!buf || buflen < 24) {
-		return -EINVAL;
-	}
-	if (!s_registered) {
-		return -EAGAIN;
-	}
-	return read_network_time_iso8601(buf, buflen);
-}
-
 int gosteady_cellular_get_network_time_unix_ms(int64_t *out_ms)
 {
 	if (!out_ms) {
 		return -EINVAL;
 	}
-	if (!s_registered) {
+
+	int64_t now_ms = 0;
+	/* Cached read from the date_time lib — no modem round-trip. -ENODATA
+	 * when no valid time has been obtained yet. */
+	if (date_time_now(&now_ms) != 0) {
 		return -EAGAIN;
 	}
-
-	/* §C11.5: bounded-timeout AT call. -ETIMEDOUT → -EAGAIN so the
-	 * caller's existing FMEA 1.1 retro-stamp path handles it. */
-	char resp[64];
-	int err = at_cmd_with_timeout("AT+CCLK?", resp, sizeof(resp),
-				       AT_DEFAULT_TIMEOUT_MS);
-	if (err == -ETIMEDOUT) {
+	/* §4.1 hard floor: reject anything outside [2024,2050]. date_time
+	 * shouldn't ever produce such a value (its modem source is the NITZ
+	 * push, not the 1980 RTC), but this guarantees the no-2080-on-wire
+	 * invariant regardless of a bogus NITZ/NTP response. */
+	if (!gs_time_year_is_plausible(now_ms)) {
+		LOG_WRN("date_time returned implausible time (%lld ms) — treating as unsynced",
+			(long long)now_ms);
 		return -EAGAIN;
 	}
-	if (err < 0) {
-		return -EIO;
-	}
-
-	int year, month, day, hour, minute, second, tz;
-	int n = sscanf(resp, "+CCLK: \"%d/%d/%d,%d:%d:%d%d\"",
-		       &year, &month, &day, &hour, &minute, &second, &tz);
-	if (n < 7) {
-		/* Modem hasn't received NITZ yet. */
-		return -EAGAIN;
-	}
-
-	/* Convert via Zephyr's UTC-aware timegm helper. struct tm fields:
-	 *   tm_year: years since 1900
-	 *   tm_mon:  0..11
-	 *   tm_mday: 1..31
-	 *   year from AT+CCLK? is 2-digit (00..99) → 2000..2099. */
-	struct tm tm = {
-		.tm_year = (2000 + year) - 1900,
-		.tm_mon  = month - 1,
-		.tm_mday = day,
-		.tm_hour = hour,
-		.tm_min  = minute,
-		.tm_sec  = second,
-	};
-	int64_t epoch_s = timeutil_timegm64(&tm);
-	if (epoch_s == (int64_t)-1) {
-		return -EIO;
-	}
-	*out_ms = epoch_s * 1000;
+	*out_ms = now_ms;
 	return 0;
+}
+
+int gosteady_cellular_get_network_time(char *buf, size_t buflen)
+{
+	if (!buf || buflen < 24) {
+		return -EINVAL;
+	}
+	int64_t now_ms = 0;
+	int err = gosteady_cellular_get_network_time_unix_ms(&now_ms);
+	if (err) {
+		return err;   /* -EAGAIN if unsynced/implausible */
+	}
+	return gosteady_cellular_format_unix_ms_iso8601(now_ms, buf, buflen);
+}
+
+bool gosteady_cellular_clock_is_synced(void)
+{
+	int64_t now_ms = 0;
+	if (date_time_now(&now_ms) != 0) {
+		return false;
+	}
+	return gs_time_year_is_plausible(now_ms);
+}
+
+int gosteady_cellular_uptime_to_unix_ms(uint32_t uptime_ms, int64_t *out_ms)
+{
+	if (!out_ms) {
+		return -EINVAL;
+	}
+	/* date_time_uptime_to_unix_time_ms() converts in place: pass the stored
+	 * k_uptime value in, receive absolute Unix-ms out, anchored to the
+	 * library's current sync (NTP when NITZ is absent). This is the §4.2
+	 * retro-stamp. -ENODATA when the clock isn't synced. */
+	int64_t v = (int64_t)uptime_ms;
+	if (date_time_uptime_to_unix_time_ms(&v) != 0) {
+		return -EAGAIN;
+	}
+	if (!gs_time_year_is_plausible(v)) {
+		return -EAGAIN;
+	}
+	*out_ms = v;
+	return 0;
+}
+
+const char *gosteady_cellular_time_source(void)
+{
+	switch (s_time_source) {
+	case GS_TIME_SRC_NITZ: return "nitz";
+	case GS_TIME_SRC_NTP:  return "ntp";
+	default:               return "unsynced";
+	}
 }
 
 int gosteady_cellular_format_unix_ms_iso8601(int64_t unix_ms,

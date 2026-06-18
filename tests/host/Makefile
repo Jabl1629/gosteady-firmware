@@ -17,7 +17,11 @@ LDLIBS  ?= -lm
 
 REPO_ROOT := $(abspath ../..)
 ALGO_DIR  := $(REPO_ROOT)/src/algo
-INC       := -I$(ALGO_DIR) -I.
+SRC_DIR   := $(REPO_ROOT)/src
+# -I$(SRC_DIR) lets the host suite include pure src/ headers (e.g. gs_time.h,
+# the 0.17.0-time plausibility gate). Only explicitly-included headers are
+# pulled in; the path is otherwise harmless.
+INC       := -I$(ALGO_DIR) -I$(SRC_DIR) -I.
 
 ALGO_SRCS := \
 	$(ALGO_DIR)/gs_filters.c \

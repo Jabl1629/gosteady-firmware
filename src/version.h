@@ -145,6 +145,29 @@
  *                    stay valid, so a 2-min+ hallway walk now keeps its gait
  *                    (previously dropped — observed on GS0000000001's 92-step
  *                    walk). gs_pipeline.c only; no contract change.
+ *   0.17.0-time      Device time reliability [UNCONDITIONAL, all cloud builds].
+ *                    Spec gosteady-portal/docs/specs/2026-06-18-device-time-
+ *                    reliability.md (coord §C47). Root cause of the Jun 14-16
+ *                    2080 mis-dating on GS0000000001: NITZ (the only abs-time
+ *                    source via AT+CCLK?) is optional in 3GPP and the roaming
+ *                    iBasis SIM didn't broadcast it, so the modem RTC sat at
+ *                    its 1980 default and the parser formatted "80/01/06" as
+ *                    2080. Fix: adopt the NCS date_time lib (CONFIG_DATE_TIME)
+ *                    which sources UTC NITZ -> NTP -> app-set; its modem source
+ *                    is the %XTIME NITZ *push* (not the free-running RTC), so a
+ *                    no-NITZ SIM falls through to SNTP over the data link. Adds
+ *                    a §4.1 plausibility gate (src/gs_time.h; year in [2024,
+ *                    2050]) as a hard floor. Deletes the §C11.5 bounded-timeout
+ *                    AT wrapper (cellular.c): date_time_now() is a cached read,
+ *                    so the time path no longer touches the modem — reclaims
+ *                    RAM and removes the session_start AT-lockup hazard. New
+ *                    optional activity fields (clock_synced + session/publish
+ *                    uptimes + boot_count + time_source) let the cloud
+ *                    reconstruct timestamps from its trusted receive time when
+ *                    the clock is unsynced (never drop). Heartbeat stays alive
+ *                    when unsynced (clock_synced=false, ts omitted) instead of
+ *                    going dark. Cloud-side reconstruction + heartbeat ts guard
+ *                    land separately. Per-config suffix preserved.
  */
 
 #ifndef GOSTEADY_VERSION_H_
@@ -156,11 +179,11 @@
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
  * to a plain compile-time literal usable in static initializers. */
 #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.16.1-gait-wakewindow"
+#define GS_FIRMWARE_VERSION_STR "0.17.0-time-wakewindow"
 #elif defined(CONFIG_GOSTEADY_LOW_POWER)
-#define GS_FIRMWARE_VERSION_STR "0.16.1-gait-pilot"
+#define GS_FIRMWARE_VERSION_STR "0.17.0-time-pilot"
 #else
-#define GS_FIRMWARE_VERSION_STR "0.16.1-gait-psm"
+#define GS_FIRMWARE_VERSION_STR "0.17.0-time-psm"
 #endif
 
 #endif /* GOSTEADY_VERSION_H_ */

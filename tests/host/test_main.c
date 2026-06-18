@@ -28,6 +28,7 @@
 #include "gs_roughness.h"
 #include "gs_step_detector.h"
 #include "gosteady_algo_params.h"
+#include "gs_time.h"   /* 0.17.0-time plausibility gate (src/gs_time.h) */
 
 #include <math.h>
 #include <stdio.h>
@@ -234,6 +235,34 @@ static void test_step_detector(const struct test_fixture *fix, const char *name)
 	}
 }
 
+/* 0.17.0-time: the year-plausibility gate that stops a 1980/2080 modem time
+ * from reaching the wire (device-time-reliability spec §4.1). Pure function,
+ * no fixtures. Epoch anchors hand-verified against 1980-01-01 (315532800),
+ * 2026-06 (~1781000000), and 2080-01-01 (3471292800). */
+static void test_time_sanity(void)
+{
+	printf("\n=== time plausibility gate (gs_time.h) ===\n");
+	const int64_t y1980_ms = 315532800000LL;   /* 1980-01-01T00:00:00Z (modem default) */
+	const int64_t y2080_ms = 3471292800000LL;  /* 2080-01-01T00:00:00Z (the mis-format) */
+	const int64_t y2026_ms = 1781000000000LL;  /* ~2026-06 (a real walk time) */
+
+	CHECK(!gs_time_year_is_plausible(y1980_ms), "reject 1980 modem default");
+	CHECK(!gs_time_year_is_plausible(y2080_ms), "reject 2080 mis-format");
+	CHECK(!gs_time_year_is_plausible(0),        "reject epoch 0 (1970)");
+	CHECK(!gs_time_year_is_plausible(-1),       "reject negative");
+	CHECK(gs_time_year_is_plausible(y2026_ms),  "accept 2026");
+
+	/* Window boundaries: [2024-01-01 inclusive, 2051-01-01 exclusive). */
+	CHECK(gs_time_year_is_plausible(GS_TIME_PLAUSIBLE_MIN_MS),
+	      "accept 2024-01-01 (inclusive lower bound)");
+	CHECK(!gs_time_year_is_plausible(GS_TIME_PLAUSIBLE_MIN_MS - 1),
+	      "reject 1 ms before 2024-01-01");
+	CHECK(!gs_time_year_is_plausible(GS_TIME_PLAUSIBLE_MAX_MS),
+	      "reject 2051-01-01 (exclusive upper bound)");
+	CHECK(gs_time_year_is_plausible(GS_TIME_PLAUSIBLE_MAX_MS - 1),
+	      "accept 1 ms before 2051-01-01");
+}
+
 /* Synthetic unit tests for the decoupled step counter + gait denominator.
  * Hand-computed expectations; independent of the reference-vector fixtures. */
 static void test_gait_synthetic(void)
@@ -425,6 +454,7 @@ int main(int argc, char **argv)
 		paths = defaults;
 	}
 
+	test_time_sanity();
 	test_gait_synthetic();
 
 	for (int i = 0; i < n; i++) {

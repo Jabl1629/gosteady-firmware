@@ -43,6 +43,10 @@
 #include "snippet.h"
 #endif
 
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+#include "forensics.h"   /* 0.17.0-time: boot_count for the activity payload */
+#endif
+
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/entropy.h>
@@ -730,6 +734,14 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 		 * strings, cellular UTC is available. */
 		a.session_start_uptime_ms = s_session_start_uptime_ms;
 		a.session_end_uptime_ms   = k_uptime_get_32();
+
+		/* 0.17.0-time (spec §4.3/§5): boot_count at record time. Lets the
+		 * cloud detect a reboot between record and publish — the uptime
+		 * delta is only valid within one boot. (The activity worker fills
+		 * clock_synced / publish_uptime_ms / time_source at publish time.) */
+#if defined(CONFIG_GOSTEADY_FORENSICS_ENABLE)
+		a.boot_count = gosteady_forensics_get_boot_count();
+#endif
 
 		int rc = gosteady_cloud_publish_activity(&a);
 		if (rc) {

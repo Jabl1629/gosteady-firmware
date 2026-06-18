@@ -23,6 +23,7 @@
 #ifndef GOSTEADY_CLOUD_H_
 #define GOSTEADY_CLOUD_H_
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -73,13 +74,22 @@ struct gosteady_activity {
 
 	/* FMEA 1.1+1.2 (2026-05-10): uptime values captured at session
 	 * start/stop. The activity worker resolves session_*_utc_iso
-	 * strings from these just before publish using current cellular
-	 * UTC + uptime delta. Handles cold-boot-mid-motion (cellular not
-	 * yet attached at session_start) and cellular-drops-mid-session
-	 * (cellular not available at session_stop). 0 means "skip retro-
-	 * stamp for this end" (defensive — caller should always populate). */
+	 * strings from these just before publish using the date_time-anchored
+	 * uptime->unix conversion (0.17.0-time; was current cellular UTC +
+	 * uptime delta). Handles cold-boot-mid-motion (cellular not yet
+	 * attached at session_start) and cellular-drops-mid-session (cellular
+	 * not available at session_stop). 0 means "skip retro-stamp for this
+	 * end" (defensive — caller should always populate). */
 	uint32_t session_start_uptime_ms;
 	uint32_t session_end_uptime_ms;
+
+	/* 0.17.0-time (device-time-reliability spec §5). Threaded into the
+	 * activity payload so the cloud can reconstruct timestamps from its
+	 * trusted receive time when the device clock was unsynced. */
+	bool     clock_synced;          /* worker-set: ISO came from a valid NITZ/NTP time */
+	uint32_t publish_uptime_ms;     /* worker-set: k_uptime at publish (anchor for cloud age-delta) */
+	uint32_t boot_count;            /* caller-set: boot_count at record (guards reboot-between-record-and-publish) */
+	const char *time_source;        /* worker-set: "nitz"|"ntp"|"unsynced" (static literal); NULL => omit */
 
 	/* FMEA 1.3 (2026-05-10): in-memory retry counter for activity
 	 * publish failures (PUBACK timeout, cellular flap during connect,
