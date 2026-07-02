@@ -39,13 +39,17 @@ extern "C" {
  * once a session file has been written in the wild, or existing files
  * will decode wrong. To add a value, append at the end. */
 enum gosteady_walker_type {
-	GS_WALKER_STANDARD  = 0,
-	GS_WALKER_TWO_WHEEL = 1,
+	GS_WALKER_STANDARD        = 0,
+	GS_WALKER_TWO_WHEEL       = 1,
+	/* DT-1 (rollator capture, append-only): 4-wheeled rollator frame. */
+	GS_WALKER_ROLLATOR_4WHEEL = 2,
 };
 
 enum gosteady_cap_type {
 	GS_CAP_TACKY = 0,
 	GS_CAP_GLIDE = 1,
+	/* DT-1: rollator accessory-platform frame mount (no leg cap). */
+	GS_CAP_FRAME_MOUNT = 2,
 };
 
 enum gosteady_surface {
@@ -86,6 +90,12 @@ enum gosteady_run_type {
 	GS_RUN_OBSTACLE                = 8,
 	GS_RUN_WALKER_TYPE_TRANSITION  = 9,
 	GS_RUN_SURFACE_TRANSITION      = 10,
+	/* DT-1 (rollator capture, append-only): wheeled-motion adversarial +
+	 * loading variants per GoSteady_Rollator_Capture_Protocol_v1.md. */
+	GS_RUN_BRAKE_STOP              = 11,
+	GS_RUN_BRAKE_DRAG              = 12,
+	GS_RUN_PARK_BRAKE_SEATED       = 13,
+	GS_RUN_HEAVY_LEAN              = 14,
 };
 
 enum gosteady_mount_config {
@@ -94,6 +104,8 @@ enum gosteady_mount_config {
 	GS_MOUNT_REAR_LEFT_LEG   = 2,
 	GS_MOUNT_REAR_RIGHT_LEG  = 3,
 	GS_MOUNT_FRONT_CROSSBAR  = 4,
+	/* DT-1: rollator accessory platform (cupholder-position mount). */
+	GS_MOUNT_ACCESSORY_PLATFORM = 5,
 };
 
 /* Pre-walk metadata that the host will eventually push over BLE

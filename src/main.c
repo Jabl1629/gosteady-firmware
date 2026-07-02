@@ -101,14 +101,27 @@ static struct gpio_callback button_cb;
  * call filesystem code from interrupt context. */
 static K_SEM_DEFINE(button_press_sem, 0, 1);
 
+/* DT-1: product-keyed hardware-description defaults for the prewalk
+ * constants below. Operator-driven captures (uart1/BLE START) supply
+ * their own 12-field metadata; these only cover SW0/motion auto-starts. */
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+#define GS_PREWALK_WALKER_TYPE  GS_WALKER_ROLLATOR_4WHEEL
+#define GS_PREWALK_CAP_TYPE     GS_CAP_FRAME_MOUNT
+#define GS_PREWALK_MOUNT_CONFIG GS_MOUNT_ACCESSORY_PLATFORM
+#else
+#define GS_PREWALK_WALKER_TYPE  GS_WALKER_TWO_WHEEL
+#define GS_PREWALK_CAP_TYPE     GS_CAP_GLIDE
+#define GS_PREWALK_MOUNT_CONFIG GS_MOUNT_FRONT_LEFT_LEG
+#endif
+
 /* Bench-default pre-walk metadata for M4. In M6 these fields will be
  * pushed over BLE by the host's start_session command. */
 static const struct gosteady_prewalk BENCH_PREWALK = {
 	.subject_id           = "S00",
-	.walker_type          = GS_WALKER_TWO_WHEEL,
-	.cap_type             = GS_CAP_GLIDE,
+	.walker_type          = GS_PREWALK_WALKER_TYPE,
+	.cap_type             = GS_PREWALK_CAP_TYPE,
 	.walker_model         = "unspecified",
-	.mount_config         = GS_MOUNT_FRONT_LEFT_LEG,
+	.mount_config         = GS_PREWALK_MOUNT_CONFIG,
 	.course_id            = "bench_m4",
 	.intended_distance_ft = 0,
 	.surface              = GS_SURFACE_POLISHED_CONCRETE,
@@ -126,10 +139,10 @@ static const struct gosteady_prewalk BENCH_PREWALK = {
  * cloud-side ingestion treats them as constants. */
 static const struct gosteady_prewalk FIELD_PREWALK = {
 	.subject_id           = "deployed",
-	.walker_type          = GS_WALKER_TWO_WHEEL,
-	.cap_type             = GS_CAP_GLIDE,
+	.walker_type          = GS_PREWALK_WALKER_TYPE,
+	.cap_type             = GS_PREWALK_CAP_TYPE,
 	.walker_model         = "unspecified",
-	.mount_config         = GS_MOUNT_FRONT_LEFT_LEG,
+	.mount_config         = GS_PREWALK_MOUNT_CONFIG,
 	.course_id            = "field",
 	.intended_distance_ft = 0,
 	.surface              = GS_SURFACE_POLISHED_CONCRETE,  /* placeholder; auto-surface classifier overrides */

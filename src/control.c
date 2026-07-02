@@ -62,8 +62,12 @@ static const struct json_obj_descr prewalk_descr[] = {
 
 /* --- Controlled-vocabulary tables (match session.h enum values) --------- */
 
-static const char *const walker_types[]  = {"standard", "two_wheel"};
-static const char *const cap_types[]     = {"tacky", "glide"};
+/* DT-1: rollator vocabulary appended (append-only — these strings map to
+ * session.h enum indices baked into the 256-B .dat header; mirror copies
+ * live in tools/read_session.py and the annotation workbooks). */
+static const char *const walker_types[]  = {"standard", "two_wheel",
+					    "rollator_4wheel"};
+static const char *const cap_types[]     = {"tacky", "glide", "frame_mount"};
 static const char *const surfaces[]      = {
 	"polished_concrete", "low_pile_carpet", "high_pile_carpet",
 	"hardwood", "tile", "linoleum", "vinyl",
@@ -75,10 +79,11 @@ static const char *const run_types[]     = {
 	"normal", "stumble", "pickup", "setdown", "stationary_baseline",
 	"car_transport", "chair_transfer", "turn_test", "obstacle",
 	"walker_type_transition", "surface_transition",
+	"brake_stop", "brake_drag", "park_brake_seated", "heavy_lean",
 };
 static const char *const mount_configs[] = {
 	"front_left_leg", "front_right_leg", "rear_left_leg",
-	"rear_right_leg", "front_crossbar",
+	"rear_right_leg", "front_crossbar", "accessory_platform",
 };
 
 static int lookup_enum(const char *s, const char *const *tbl, size_t n)

@@ -752,6 +752,11 @@ static int drain_one_snippet(void)
  *   reset_reason    — formatted reset cause from M10.7.3 forensics
  *   fault_counters  — JSON object from M10.7.3 forensics
  *   watchdog_hits   — cumulative WDT-triggered resets
+ *   clock_synced    — 0.17.0-time: gates cloud-side trust of ts
+ *   time_source     — 0.17.0-time: nitz|ntp|unsynced (observability)
+ *   boot_count      — 0.17.0-time + battery-swap detection
+ *   device_type     — DT-1 product self-report (walker_cap |
+ *                     rollator_platform); cloud cross-checks vs registry
  *
  * Each optional is independently gated so a missing prereq (forensics
  * not enabled, fuel gauge not warm, etc.) just omits that field instead
@@ -832,6 +837,14 @@ static int build_heartbeat_payload(char *buf, size_t buflen, size_t *out_len)
 	/* firmware: semver from version.h (single source of truth). Always
 	 * publish — useful for cloud-side correlation regardless of feature gates. */
 	APPEND_OR_FAIL(",\"firmware\":\"%s\"", GS_FIRMWARE_VERSION_STR);
+
+	/* device_type: product self-report (DT-1 / portal memo Q7 / coord
+	 * §C48.3). The cloud's heartbeat-processor cross-checks this against
+	 * the registry-authoritative Device Registry value and ALARMS on
+	 * mismatch (wrong-product-firmware-flashed detection) — it never
+	 * rejects; the registry wins. Also lands in Shadow reported via the
+	 * accept-all contract. Emitted by BOTH products. */
+	APPEND_OR_FAIL(",\"device_type\":\"%s\"", GS_PRODUCT_DEVICE_TYPE_STR);
 
 	/* uptime_s: time since boot. Bounded by uint32_t cast (~136 years). */
 	APPEND_OR_FAIL(",\"uptime_s\":%u",
@@ -1039,9 +1052,24 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 /* ---- M12.1d activity path ---- */
 
 /*
- * Build activity JSON payload from struct.
- *   Required: serial, session_start, session_end, steps, distance_ft, active_min
- *   Optional: roughness_R, surface_class, firmware_version
+ * Build activity JSON payload from struct. The metric set is PER-PRODUCT
+ * (DT-1, portal spec phase-dt1-rollator-bench-bringup.md D1 — the contract
+ * gate lives here at the wire boundary, in one function):
+ *
+ *   walker_cap        — Required: serial, session_start, session_end,
+ *                       steps, distance_ft, active_min.
+ *                       Optional: roughness_R, gait_speed_fts,
+ *                       surface_class.
+ *   rollator_platform — bench v0 (memo D10): Required: serial,
+ *                       session_start, session_end, active_min ONLY.
+ *                       The walker stride metrics are compile-gated OUT:
+ *                       their omission sentinels (NaN / 0xFF) are
+ *                       data-driven and the walker algo *will* produce
+ *                       values on wheeled motion, so omission must be
+ *                       compile-time. Parity (steps/distance/gait) returns
+ *                       with the DT-2 algo arc.
+ *   Core (both)       — 0.17.0-time reliability block, time_source,
+ *                       firmware_version.
  *
  * Optional fields with sentinel values are omitted from the JSON entirely
  * (per coord §C.7 accept-all + the desire to avoid a "0 = not measured"
@@ -1050,6 +1078,20 @@ static void heartbeat_thread_fn(void *p1, void *p2, void *p3)
 static int build_activity_payload(const struct gosteady_activity *a,
 				  char *buf, size_t buflen, size_t *out_len)
 {
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+	/* Rollator bench-v0 required block: active_min only (DT-1 L2).
+	 * active_min derives from the motion gate (product-agnostic), not
+	 * the walker stride pipeline. */
+	int n = snprintf(buf, buflen,
+		"{\"serial\":\"%s\","
+		 "\"session_start\":\"%s\","
+		 "\"session_end\":\"%s\","
+		 "\"active_min\":%u",
+		client_id(),
+		a->session_start_utc_iso,
+		a->session_end_utc_iso,
+		(unsigned)a->active_min);
+#else
 	int n = snprintf(buf, buflen,
 		"{\"serial\":\"%s\","
 		 "\"session_start\":\"%s\","
@@ -1063,6 +1105,7 @@ static int build_activity_payload(const struct gosteady_activity *a,
 		(unsigned)a->steps,
 		(double)a->distance_ft,
 		(unsigned)a->active_min);
+#endif
 	if (n < 0 || (size_t)n >= buflen) {
 		return -ENOMEM;
 	}
@@ -1099,6 +1142,11 @@ static int build_activity_payload(const struct gosteady_activity *a,
 		n += m;
 	}
 
+#if !defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+	/* Walker-only optional stride metrics. Compile-gated (not sentinel-
+	 * gated) for rollator — see the function comment. The values still
+	 * exist in the struct + uart0 ALGO_V1A/B/C logs on rollator builds,
+	 * which is deliberate bench diagnostics. */
 	if (isfinite((double)a->roughness_R)) {
 		int m = snprintf(buf + n, buflen - (size_t)n,
 				 ",\"roughness_R\":%.4f", (double)a->roughness_R);
@@ -1124,6 +1172,7 @@ static int build_activity_payload(const struct gosteady_activity *a,
 		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
 		n += m;
 	}
+#endif /* !CONFIG_GOSTEADY_PRODUCT_ROLLATOR */
 
 	if (a->firmware_version[0] != '\0') {
 		int m = snprintf(buf + n, buflen - (size_t)n,

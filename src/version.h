@@ -177,13 +177,45 @@
  * behavior the cloud/portal team must be able to attribute — so the string
  * tracks CONFIG_GOSTEADY_LOW_POWER at compile time. CONFIG_* macros are
  * always visible via Zephyr's globally-injected autoconf.h, so this resolves
- * to a plain compile-time literal usable in static initializers. */
-#if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
-#define GS_FIRMWARE_VERSION_STR "0.17.0-time-wakewindow"
-#elif defined(CONFIG_GOSTEADY_LOW_POWER)
-#define GS_FIRMWARE_VERSION_STR "0.17.0-time-pilot"
+ * to a plain compile-time literal usable in static initializers.
+ *
+ * Phase DT-1 (2026-07-01, coord §C49): the cascade gained a PRODUCT
+ * dimension. Walker-cap strings are UNCHANGED (cloud cohort dashboards key
+ * on firmware_version — continuity matters); the rollator product gets its
+ * own `rol-` line per memo Q5. Keep every string ≤31 chars — the activity
+ * struct's firmware_version[32] (cloud.h) silently truncates longer ones
+ * (the 2026-05-17 [16]-truncation bug is the cautionary tale). */
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+  #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+  /* "ww" not "wakewindow": the .dat session header stores
+   * firmware_version[16] (session.h) — 15 chars + NUL max. The walker
+   * wakewindow string predates that field and already truncates there
+   * (pre-existing, tolerated); new product lines shouldn't repeat it. */
+  #define GS_FIRMWARE_VERSION_STR "rol-0.1.0-ww"
+  #elif defined(CONFIG_GOSTEADY_LOW_POWER)
+  #define GS_FIRMWARE_VERSION_STR "rol-0.1.0-pilot"
+  #else
+  #define GS_FIRMWARE_VERSION_STR "rol-0.1.0-bench"
+  #endif
+#else /* CONFIG_GOSTEADY_PRODUCT_WALKER_CAP (choice default) */
+  #if defined(CONFIG_GOSTEADY_PREACT_LOWPOWER)
+  #define GS_FIRMWARE_VERSION_STR "0.17.0-time-wakewindow"
+  #elif defined(CONFIG_GOSTEADY_LOW_POWER)
+  #define GS_FIRMWARE_VERSION_STR "0.17.0-time-pilot"
+  #else
+  #define GS_FIRMWARE_VERSION_STR "0.17.0-time-psm"
+  #endif
+#endif
+
+/* Product identity string for the heartbeat `device_type` field (DT-1 /
+ * portal memo Q7). MUST match the cloud enum in
+ * gosteady-portal/infra/lambda/_shared/device_types/ — the DT-0
+ * heartbeat-processor cross-checks this against the Device Registry and
+ * alarms on mismatch (wrong-product-firmware-flashed detection). */
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+#define GS_PRODUCT_DEVICE_TYPE_STR "rollator_platform"
 #else
-#define GS_FIRMWARE_VERSION_STR "0.17.0-time-psm"
+#define GS_PRODUCT_DEVICE_TYPE_STR "walker_cap"
 #endif
 
 #endif /* GOSTEADY_VERSION_H_ */

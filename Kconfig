@@ -10,6 +10,38 @@ source "Kconfig.zephyr"
 
 menu "GoSteady"
 
+# ── Product selection (Phase DT-1, portal spec phase-dt1-rollator-bench-
+# bringup.md / memo 2026-07-01-device-types.md D8). One firmware app, two
+# products sharing all platform code (cellular/cloud/activation/wipe/
+# forensics/battery/session). The product choice keys:
+#   - GS_FIRMWARE_VERSION_STR + GS_PRODUCT_DEVICE_TYPE_STR (src/version.h)
+#   - the activity uplink metric set (src/cloud.c build_activity_payload —
+#     rollator bench-v0 publishes active_min only; walker keeps
+#     steps/distance_ft/roughness/surface/gait)
+#   - bench/field prewalk constants (src/main.c)
+# Default = walker cap so every pre-DT-1 overlay/build is unaffected.
+choice GOSTEADY_PRODUCT
+	prompt "GoSteady product"
+	default GOSTEADY_PRODUCT_WALKER_CAP
+
+config GOSTEADY_PRODUCT_WALKER_CAP
+	bool "Walker cap"
+	help
+	  The original GoSteady smart walker cap (leg-mounted, lift-and-
+	  place gait). Activity uplink carries the full walker metric set.
+
+config GOSTEADY_PRODUCT_ROLLATOR
+	bool "Rollator accessory platform"
+	help
+	  Frame-mounted rollator accessory-platform device (first SKU:
+	  cupholder). Bench-v0 activity contract publishes active_min +
+	  the Core envelope only — wheeled-motion steps/distance/gait
+	  algorithms arrive with the DT-2 capture/algo arc. Heartbeat
+	  reports device_type "rollator_platform" (cloud cross-checks
+	  against the Device Registry and alarms on mismatch).
+
+endchoice
+
 config GOSTEADY_FIELD_MODE
 	bool "Build for deployment (field) mode"
 	default n

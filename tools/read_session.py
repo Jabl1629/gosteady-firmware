@@ -82,9 +82,12 @@ assert struct.calcsize(HEADER_FMT) == HEADER_BYTES, (
 SAMPLE_FMT = "<I6f"  # t_ms + 6 floats
 
 # Controlled vocabularies — must exactly match session.h and the
-# `Vocabularies` sheet of GoSteady_Capture_Annotations_v1.xlsx.
-WALKER_TYPE = ["standard", "two_wheel"]
-CAP_TYPE = ["tacky", "glide"]
+# `Vocabularies` sheet of GoSteady_Capture_Annotations_v1.xlsx (+ the
+# rollator workbook GoSteady_Rollator_Annotations_v1.xlsx). DT-1 appended
+# the rollator entries — APPEND-ONLY: values are uint8 indices baked into
+# the 256-byte .dat header.
+WALKER_TYPE = ["standard", "two_wheel", "rollator_4wheel"]
+CAP_TYPE = ["tacky", "glide", "frame_mount"]
 SURFACE = [
     "polished_concrete", "low_pile_carpet", "high_pile_carpet",
     "hardwood", "tile", "linoleum", "vinyl",
@@ -96,10 +99,11 @@ RUN_TYPE = [
     "normal", "stumble", "pickup", "setdown", "stationary_baseline",
     "car_transport", "chair_transfer", "turn_test", "obstacle",
     "walker_type_transition", "surface_transition",
+    "brake_stop", "brake_drag", "park_brake_seated", "heavy_lean",
 ]
 MOUNT_CONFIG = [
     "front_left_leg", "front_right_leg", "rear_left_leg",
-    "rear_right_leg", "front_crossbar",
+    "rear_right_leg", "front_crossbar", "accessory_platform",
 ]
 
 

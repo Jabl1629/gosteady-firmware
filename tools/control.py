@@ -71,6 +71,39 @@ PRESETS: dict[str, dict] = {
         "surface": "polished_concrete", "intended_speed": "normal",
         "direction": "s_curve", "run_type": "normal", "operator": "jace",
     },
+    # ── Rollator presets (DT-1; GoSteady_Rollator_Capture_Protocol_v1.md) ──
+    "rollator-bench": {
+        "subject_id": "S00", "walker_type": "rollator_4wheel",
+        "cap_type": "frame_mount", "walker_model": "unspecified",
+        "mount_config": "accessory_platform",
+        "course_id": "rollator_bench_dt1", "intended_distance_ft": 0,
+        "surface": "polished_concrete", "intended_speed": "normal",
+        "direction": "straight", "run_type": "normal", "operator": "bench",
+    },
+    "rollator-concrete-normal-20": {
+        "subject_id": "S00", "walker_type": "rollator_4wheel",
+        "cap_type": "frame_mount", "walker_model": "unspecified",
+        "mount_config": "accessory_platform",
+        "course_id": "rol_concrete_A_straight", "intended_distance_ft": 20,
+        "surface": "polished_concrete", "intended_speed": "normal",
+        "direction": "straight", "run_type": "normal", "operator": "jace",
+    },
+    "rollator-brake-stop-20": {
+        "subject_id": "S00", "walker_type": "rollator_4wheel",
+        "cap_type": "frame_mount", "walker_model": "unspecified",
+        "mount_config": "accessory_platform",
+        "course_id": "rol_concrete_A_straight", "intended_distance_ft": 20,
+        "surface": "polished_concrete", "intended_speed": "normal",
+        "direction": "straight", "run_type": "brake_stop", "operator": "jace",
+    },
+    "rollator-turn-left-20": {
+        "subject_id": "S00", "walker_type": "rollator_4wheel",
+        "cap_type": "frame_mount", "walker_model": "unspecified",
+        "mount_config": "accessory_platform",
+        "course_id": "rol_concrete_A_turn", "intended_distance_ft": 20,
+        "surface": "polished_concrete", "intended_speed": "normal",
+        "direction": "turn_left", "run_type": "turn_test", "operator": "jace",
+    },
 }
 
 
