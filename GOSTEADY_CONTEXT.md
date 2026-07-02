@@ -85,10 +85,11 @@ export ZEPHYR_TOOLCHAIN_VARIANT="zephyr"
 
 | Build dir | Overlay | Use case |
 |---|---|---|
-| `build/` | none (default `prj.conf`) | Bench data collection (M8 captures, no cellular). Default. |
+| `build/` | none (default `prj.conf`) | Bench data collection (M8 captures, no cellular). Default. **⚠ BROKEN at 0.17.0: cellular.c's date_time calls don't link without `CONFIG_DATE_TIME`** (cloud overlays set it; base prj.conf doesn't — second rot finding at DT-1, coord §C49). Workaround: `-DCONFIG_DATE_TIME=y -DCONFIG_DATE_TIME_NTP=n` on the west command line (NTP needs the networking stack). |
 | `build_cloud/` | `prj_cloud.conf` | Bench + cloud (cellular MQTT). Iterating on M12.1+. **⚠ BROKEN at 0.17.0: RAM overflows by 1296 B at link** (pre-existing rot — recent units all shipped pilot/wakewindow configs where snippets are off; discovered at DT-1 bring-up, coord §C49). Fix = snippets off or find ~1.3 KB elsewhere. |
 | `build_field/` | `prj_field.conf` | Deployment image. `CONFIG_GOSTEADY_FIELD_MODE=y` gates off SW0 / dump UART / heartbeat LEDs. |
 | `build_pilot/` | `prj_pilot.conf` (self-contained) | **Battery pilot image (0.13.1-pilot).** = field + snippets OFF + `CONFIG_GOSTEADY_LOW_POWER` + `CONFIG_GOSTEADY_SESSION_LED` (green LED during recording, dark at rest). Build single-overlay (sysbuild only forwards one `EXTRA_CONF_FILE` cleanly): `-DEXTRA_CONF_FILE=prj_pilot.conf`. |
+| `build_rollator_bench/` | none + `-DCONFIG_GOSTEADY_PRODUCT_ROLLATOR=y -DCONFIG_DATE_TIME=y -DCONFIG_DATE_TIME_NTP=n` | **ROLLATOR capture-day image (no cloud):** for DT-2 data-collection days — no activity uplinks → no .dat auto-prune after PUBACK (the cloud build deletes each session seconds after publish once cellular is up!), no SIM spend. BLE/uart1 capture identical. NITZ-only clock. |
 | `build_rollator_gs81/` | `prj_rollator_cloud.conf` | **ROLLATOR product (DT-1, coord §C49):** bench + cloud for the rollator accessory platform. `CONFIG_GOSTEADY_PRODUCT_ROLLATOR=y` → version `rol-0.1.0-bench`, heartbeat `device_type:"rollator_platform"`, activity = active_min + Core envelope only. Snippets OFF (RAM + iBasis 10 MB budget). Client id GS9999999981 baked as overlay default. |
 
 ### Build + flash commands
