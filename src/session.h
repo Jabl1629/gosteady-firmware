@@ -211,6 +211,15 @@ int gosteady_session_stop(uint32_t *out_sample_count);
 /* True if a session is currently open and accepting samples. */
 bool gosteady_session_is_active(void);
 
+/* DT-1 capture fix (coord §C50): mark the CURRENT session as operator-
+ * driven (uart1/BLE START via control.c). Manual sessions are exempt from
+ * the Phase-3 stillness auto-stop so protocol runs with long stationary
+ * segments (stationary_baseline / park_brake_seated, 30 s) survive to
+ * their explicit STOP. Flag auto-clears on every session start; flash-full
+ * auto-stop still applies to manual sessions (wedge protection). */
+void gosteady_session_mark_manual(void);
+bool gosteady_session_is_manual(void);
+
 /* Gated-sampler primitive (docs/specs/preactivation-lowpower-mode.md §3).
  * Blocks the calling thread until gosteady_session_start() opens a session
  * (the start signal is given AFTER s_active=true, so on return the session

@@ -675,6 +675,14 @@ static void auto_start_entry(void *p1, void *p2, void *p3)
 		}
 #endif
 
+		if (!IS_ENABLED(CONFIG_GOSTEADY_MOTION_AUTOSTART)) {
+			/* DT-1 capture image (§C50): operator-driven builds
+			 * disable motion auto-start — it squats sessions between
+			 * protocol runs. PREACT wake-window handling above is
+			 * unaffected. */
+			continue;
+		}
+
 		LOG_INF("auto-start: motion observed → confirming with BMI270");
 
 		/* Resume BMI270 (idempotent if already on) and apply the
@@ -1220,7 +1228,12 @@ int main(void)
 			 * the threshold — fine for a 15-30 s timeout. */
 			uint32_t stationary_n = gosteady_session_stationary_samples();
 			uint32_t stationary_s = stationary_n / 100;
-			bool stop_for_stillness = (stationary_s >= AUTO_STOP_STATIONARY_S);
+			/* §C50: operator-driven sessions (uart1/BLE START) are
+			 * exempt from stillness auto-stop — protocol runs include
+			 * 30 s stationary segments; they end on explicit STOP.
+			 * Flash-full auto-stop below still applies. */
+			bool stop_for_stillness = (stationary_s >= AUTO_STOP_STATIONARY_S) &&
+						  !gosteady_session_is_manual();
 			/* Phase 1.6 follow-up 2026-05-05: also auto-stop when the
 			 * writer thread has hit ENOSPC. Without this, the writer
 			 * keeps failing every batch flush, the sampler's msgq

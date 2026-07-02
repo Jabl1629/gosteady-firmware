@@ -196,6 +196,9 @@ static int cmd_start(const char *json_start, size_t json_len,
 	if (ret < 0) {
 		return snprintk(out, out_sz, "ERR start failed (%d)", ret);
 	}
+	/* DT-1 §C50: operator-driven session — exempt from stillness
+	 * auto-stop (30 s baseline runs must survive to explicit STOP). */
+	gosteady_session_mark_manual();
 	/* Echo the UUID back so transport-side clients (capture.html in
 	 * particular) can key their POST-WALK notes against the same
 	 * primary key the session file header carries. Falls back to a

@@ -42,6 +42,20 @@ config GOSTEADY_PRODUCT_ROLLATOR
 
 endchoice
 
+config GOSTEADY_MOTION_AUTOSTART
+	bool "Motion-triggered automatic session start"
+	default y
+	help
+	  ADXL367 wake-on-motion -> BMI270 confirmation -> automatic session
+	  start. This is THE capture mechanism for autonomous deployments
+	  (field/pilot) and stays on everywhere by default.
+
+	  Disable ONLY for operator-driven data-collection images (DT-1
+	  rollator capture protocol): with it enabled, handling the device
+	  between protocol runs auto-starts squatter sessions, so the
+	  operator's next START gets "ERR already active" and stray STOPs
+	  close phantom sessions (observed 2026-07-02, coord §C50).
+
 config GOSTEADY_FIELD_MODE
 	bool "Build for deployment (field) mode"
 	default n

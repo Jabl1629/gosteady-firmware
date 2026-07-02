@@ -25,9 +25,11 @@ the seated case is a realistic rollator use pattern with no walker analog.
 
 ## 2. Prerequisites
 
-- Bench unit `GS9999999981` flashed with `rol-0.1.0-bench`
-  (`prj_rollator_cloud.conf`), cert at sec_tag 201, uart1 dump channel
-  verified (`tools/pull_sessions.py --list-only` returns).
+- Bench unit `GS9999999981` flashed with the **capture-day image**
+  (`build_rollator_bench`: no cloud, motion auto-start OFF, manual
+  sessions exempt from stillness auto-stop — coord §C50). Do NOT run the
+  protocol on the cloud build: it auto-prunes each `.dat` seconds after
+  publish, and motion auto-start squats sessions between runs.
 - A real 4-wheel rollator with functional hand brakes + parking brake.
 - Device mounted on the **accessory platform position** (cupholder mount
   point, frame midline). Mounting method for the bare Thingy:91 X is an

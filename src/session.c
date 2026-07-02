@@ -96,6 +96,7 @@ static struct k_thread writer_thread;
  * (start/stop) or the writer thread while the other is quiesced. */
 static struct fs_file_t  s_file;
 static bool              s_active;
+static bool              s_manual_session; /* §C50 operator-driven flag */
 static struct gosteady_session_header s_header;
 static uint32_t          s_session_start_uptime_ms;
 static uint32_t          s_sample_count;
@@ -504,6 +505,7 @@ int gosteady_session_start(const struct gosteady_prewalk *prewalk)
 	s_sample_count            = 0;
 	s_dropped_samples         = 0;
 	s_active                  = true;
+	s_manual_session          = false; /* set post-hoc by control.c (§C50) */
 
 	/* M12.1d: capture cellular UTC for the activity uplink's session_start
 	 * field. Best-effort — if cellular isn't ready (modem still attaching,
@@ -753,6 +755,16 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 		*out_sample_count = s_sample_count;
 	}
 	return ret;
+}
+
+void gosteady_session_mark_manual(void)
+{
+	s_manual_session = true;
+}
+
+bool gosteady_session_is_manual(void)
+{
+	return s_manual_session;
 }
 
 bool gosteady_session_is_active(void)
