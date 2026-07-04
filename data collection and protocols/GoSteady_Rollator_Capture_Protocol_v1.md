@@ -30,6 +30,11 @@ the seated case is a realistic rollator use pattern with no walker analog.
   sessions exempt from stillness auto-stop — coord §C50). Do NOT run the
   protocol on the cloud build: it auto-prunes each `.dat` seconds after
   publish, and motion auto-start squats sessions between runs.
+- **⚠ UNTIL coord §C51 fixes land:** (1) after EVERY power-on, plug USB and
+  open uart1 once (`tools/control.py status`) before BLE capture — cold
+  BLE-only boots are dead air (no responses, nothing records); (2) NEVER
+  power off with un-pulled runs (boot sweep deletes all `.dat`); (3) after
+  each START, confirm `OK started <uuid>` appears before walking.
 - A real 4-wheel rollator with functional hand brakes + parking brake.
 - Device mounted on the **accessory platform position** (cupholder mount
   point, frame midline). Mounting method for the bare Thingy:91 X is an

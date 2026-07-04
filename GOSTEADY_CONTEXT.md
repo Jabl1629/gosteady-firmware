@@ -434,6 +434,22 @@ Fired immediately by cloud-side `end-assignment` (`POST /api/v1/devices/{serial}
 
 ## Known gotchas (canonical "got bitten" list)
 
+### ⚠ OPEN BUGS — rollator capture unit (2026-07-04, coord §C51; FIX FIRST)
+
+- **Bridge uart1 enable-on-USB-only:** the nRF5340 bridge fork only enables
+  uart1 when a USB CDC host opens the port; BLE-only cold boot = dead air
+  (zero RX on capture page; cost 15 protocol runs 2026-07-04). Enable
+  persists once set → WORKAROUND: after every power-on, plug USB + open
+  uart1 once (`tools/control.py status`), then BLE works all boot. FIX:
+  force uart1 enabled at bridge boot (`bridge_fw/src/modules/uart_handler.c`
+  subscriber/enable logic), rebuild w/ `-DCONFIG_BRIDGE_BLE_ALWAYS_ON=y`,
+  flash SW2→nRF53 via `west flash --runner nrfjprog --recover` (nrfutil
+  runner broken).
+- **Boot orphan sweep eats un-pulled capture data:** session.c boot sweep
+  deletes ALL `.dat` at every boot, incl. capture image. WORKAROUND: never
+  power off before `pull_sessions.py`. FIX: `CONFIG_GOSTEADY_BOOT_ORPHAN_SWEEP`
+  default y, =n in capture image args.
+
 ### Build / flash
 
 - **Board target must be `thingy91x/nrf9151/ns`.** Easy to accidentally target `nrf9151dk` — builds clean but pin assignments are wrong. Sanity check: `build/gosteady-firmware/zephyr/.config` should contain `CONFIG_BOARD="thingy91x"`.
