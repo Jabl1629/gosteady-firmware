@@ -270,9 +270,27 @@ keep. Fig G.
 odometer is validated at **~26 % deploy MAPE** on variable-speed, 3-surface,
 out-of-sample data, with the honest harness. Highest-leverage next lever is the
 **surface classifier** (82 % → oracle 16 % if perfected; misclassification is the main
-error source). Remaining caveats: GT is still taped (not measured) distance; `walk_t`
-is gate-dependent; single mount / subject / rollator. Harness:
-`algo/rollator_surface_classifier.py`; result Fig G.
+error source). Remaining caveats (GT note retracted — the taped course IS the
+measured distance, per operator): `walk_t` is gate-dependent; single mount / subject
+/ rollator. Harness: `algo/rollator_surface_classifier.py`; result Fig G.
+
+### 3f. Decisions — rotation-rate ruled out; continuous flat-norm chosen for the port (2026-07-05)
+
+- **Wheel-rotation-rate approach: RULED OUT.** Tested envelope-spectrum extraction of
+  `f_rev` (a surface-invariant speed feature that would remove the classifier). Implied
+  wheel circumference `C = speed/f_rev` was **not constant — pooled 3.06 ± 2.88 ft,
+  CV 94 %** (a real wheel is ~1.5–2.1 ft, tight); rotation-distance MAPE **43 %** (= the
+  stopwatch); only 26/38 runs even resolved a peak. The frame mount doesn't see clean
+  once-per-rev excitation — the dominant signal is speed-scaled surface-texture impacts,
+  not a rotation tone. Fig H. **Surface-dependence is unavoidable.**
+- **Ported estimator: CONTINUOUS flat-norm (no explicit surface classifier).** Given
+  surface-dependence is unavoidable, the choice is discrete (classify → per-surface
+  curve, 26 % but a 50–120 % misclassification cliff) vs continuous (`speed ≈
+  amp_rate / flatness`, no label, 29 %). **Chosen: continuous.** Rationale: no hard
+  classification to fail catastrophically on an unseen surface/rollator; simpler
+  on-device (a divide, not stored centroids + argmin); the 3 pp cost is within noise
+  at n=1 rollator. Revisit the discrete variant only if the classifier clears ~90 %+
+  with more data. Firmware-port scope: `docs/specs/2026-07-05-rollator-distance-firmware-port.md`.
 
 ## 4. Proposed development arc
 
