@@ -211,7 +211,7 @@
 
 <header>
   <div>
-    <h1>GoSteady Rollator Capture <small>(distance capture · 2026-07-05 · 36 runs)</small></h1>
+    <h1>GoSteady Rollator Capture <small>(distance capture · 2026-07-05 · 42 runs)</small></h1>
     <div id="conn-state" class="disconnected">Disconnected</div>
   </div>
   <button id="conn-btn">Connect</button>
@@ -352,15 +352,18 @@
   };
 
   // 2026-07-05 rollator DISTANCE-ESTIMATOR capture (v2). Straight-line
-  // walking runs only, to train/validate the surface-normalized vibration
+  // walking runs, to train/validate the surface-normalized vibration
   // odometer — see docs/specs/2026-07-04-rollator-algorithm-scope.md.
-  // Matrix: 3 surfaces (polished < sidewalk < asphalt roughness ladder)
-  // x 3 speeds (slow/normal/fast) x 2 distances (20/40 ft) x 2 reps = 36 runs.
-  // No turns / s-curves / brake / lean / baselines this pass. Keys match the
-  // annotation workbook columns exactly. Surface & speed strings are device
-  // vocab (SURFACE incl. outdoor_asphalt; SPEED = slow|normal|fast).
+  // Per surface (14 runs): 3 speeds (slow/normal/fast) x 2 distances (20/40 ft)
+  // x 2 reps  +  2 mid-run PAUSE runs (course_id *_pause: walk ~half, hold a
+  // deliberate 10 s stop, then finish). 3 surfaces (polished < sidewalk <
+  // asphalt roughness ladder) = 42 runs. The pause runs validate motion-gate
+  // trimming for the real-world stop-start case; capture sessions are marked
+  // manual (control.c) → EXEMPT from the 15 s stillness auto-stop, so a mid-run
+  // pause will NOT end the recording. No turns / s-curves this pass. Surface &
+  // speed strings are device vocab (SURFACE incl. outdoor_asphalt).
   const RUNS = [
-    // ---- Indoor polished concrete (smoothest) — runs 1..12 ----
+    // ---- Indoor polished concrete (smoothest) — runs 1..14 ----
     { idx: 1 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
     { idx: 2 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
     { idx: 3 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
@@ -373,34 +376,40 @@
     { idx: 10, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
     { idx: 11, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
     { idx: 12, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 13, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_pause',    intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'PAUSE · walk ½, STOP 10 s (keep recording), finish · log interruption@mm:ss' },
+    { idx: 14, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_pause',    intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'PAUSE · walk ½, STOP 10 s (keep recording), finish · log interruption@mm:ss' },
 
-    // ---- Outdoor concrete sidewalk (medium) — runs 13..24 ----
-    { idx: 13, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
-    { idx: 14, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 15, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 16, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 17, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 18, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 19, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 20, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 21, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 22, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 23, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 24, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    // ---- Outdoor concrete sidewalk (medium) — runs 15..28 ----
+    { idx: 15, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
+    { idx: 16, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 17, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 18, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 19, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 20, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 21, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 22, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 23, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 24, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 25, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 26, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 27, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_pause',    intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'PAUSE · walk ½, STOP 10 s (keep recording), finish · log interruption@mm:ss' },
+    { idx: 28, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_pause',    intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'PAUSE · walk ½, STOP 10 s (keep recording), finish · log interruption@mm:ss' },
 
-    // ---- Outdoor asphalt (roughest — the new 3rd surface) — runs 25..36 ----
-    { idx: 25, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
-    { idx: 26, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 27, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 28, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 29, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 30, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 31, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 32, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 33, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 34, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
-    { idx: 35, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
-    { idx: 36, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    // ---- Outdoor asphalt (roughest — the new 3rd surface) — runs 29..42 ----
+    { idx: 29, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
+    { idx: 30, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 31, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 32, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 33, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 34, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 35, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 36, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 37, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 38, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 39, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 40, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 41, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_pause',    intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'PAUSE · walk ½, STOP 10 s (keep recording), finish · log interruption@mm:ss' },
+    { idx: 42, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_pause',    intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'PAUSE · walk ½, STOP 10 s (keep recording), finish · log interruption@mm:ss' },
   ];
 
   const GROUP_LABEL = {
