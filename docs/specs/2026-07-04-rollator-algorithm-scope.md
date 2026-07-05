@@ -156,8 +156,123 @@ walker-comparable (22 %). Fig F.
 **Confidence: mechanism demonstrated, NOT validated.** n=8 over 2 surfaces; the
 flatness feature was chosen on these same runs; all speeds 0.7–1.2 ft/s; distances
 only 10/20 ft; the single-constant `speed ∝ amp/flatness` collapse is a 2-point
-coincidence-risk. **The decisive test is a real 3rd surface (carpet):** does flatness
+coincidence-risk. **The decisive test is a real 3rd surface:** does flatness
 still track its roughness, and does the one constant still hold?
+
+### 3c. 2026-07-05 capture — 3rd surface is asphalt (status: captured, pull pending)
+
+Operator captured a 3-surface set on 2026-07-05 (asphalt substituted for carpet — a
+*rougher* extreme, which stresses the roughness feature harder). Composition (from
+POST-WALK notes; `.dat` IMU **not yet pulled** — see below):
+
+| Surface | Valid runs | Notes |
+|---|---|---|
+| polished_concrete | 4 (today) + ~8 (07-04 recovered) | operator stopped early; 07-04 fills it |
+| outdoor_concrete (sidewalk) | 14 | re-taped 2nd pass; **first pass of 14 invalidated** (mistaped course distance, per operator; boundary 15:58:00Z) |
+| **outdoor_asphalt** | **15 (complete)** | the new roughest surface — all speeds × distances × reps + pause runs |
+| pause runs (mid-run 10 s stop) | 5 (sidewalk ×2, asphalt ×3) | one asphalt pause has operator *leaning on the device* during the stop |
+
+Invalidation applied to a copy of the notes
+(`raw_sessions/2026-07-05-dt1-rollator/…notes_2026-07-05.json`; original preserved
+as `…ORIGINAL.json`). The 15:57:06Z run (6 s past the operator's stated 09:57 MT
+cutoff, but unambiguously first-pass) was included in the invalidation — flagged.
+
+**Blocker:** the pull is stuck — the Thingy's nRF5340 bridge USB-C isn't enumerated
+(only the external J-Link is connected), so there's no CDC serial port for
+`pull_sessions.py`. A background watcher
+(`scratchpad/pull_and_analyze.sh`) polls for the port and will auto-pull → ingest
+(with the invalidated notes) → run the full 3-surface analysis on reconnect.
+
+**Classifier v1 built** (`algo/rollator_surface_classifier.py`): multi-feature
+roughness (flatness/crest/kurtosis), a 3-class surface classifier, distance LOO
+(leave-one-run-out **and** leave-one-surface-out), and pause-trim validation.
+Validated on the 07-04 2-surface data: roughness features monotonic + speed-
+independent; classifier **90 % leave-one-run-out**; distance flatness-normalized
+**20 %** ≈ oracle **18 %** vs naive **38 %**. The 3-surface generalization
+(leave-one-surface-out onto asphalt) + pause-trim run automatically once the `.dat`
+land. A design + adversarial-methodology review workflow is running to harden the
+approach before then.
+
+### 3d. ⚠ RETRACTION — the "17 % validated" headline was a constant-speed artifact (2026-07-05 review)
+
+A 13-agent design + adversarial-review workflow (wf_997887c5) **reproduced the
+numbers directly and demolished §3a/§3b's headline.** Treat §3a/§3b as superseded:
+
+- **A plain stopwatch beats the odometer.** On 07-04, `dist = m·walk_t` (time-only)
+  scores **11.6 %** LOO — *better* than flatness-normalized (16.9 %) and oracle
+  (20.4 %). Every run sat at 0.66–1.21 ft/s (std 0.15), so distance ≈ speed·time
+  with speed ~fixed, and the vibration machinery **adds noise, not signal**. The
+  16.9 % was scored against the wrong baseline.
+- **Within one surface, flatness normalization does nothing** (polished-only:
+  20.8 % flat vs 20.0 % naive). Its entire apparent value was separating the n=2
+  outdoor runs — i.e. the "surface" effect, on 2 points.
+- **The naive-vs-flatness gap is not significant** (95 % CI **[−4, +38] pp**, crosses
+  0). Nested feature selection (choosing the normalizer *inside* each fold) **doesn't
+  even pick flatness** — it picks raw amplitude. The `k≈0.29·flatness` "coincidence"
+  reproduces 56 % of the time from two random same-surface draws.
+- Five methodology flaws **confirmed, all high-severity**: (1) feature-selection
+  double-dipping; (2) small-n overfit (n=8, 2 GT values); (3) `vib_int` integrates
+  *time-in-motion, not distance* — it counts any fidget/lean/pad window (a 7-burst
+  slow run was 54 % non-traversal); (4) leave-one-surface-out with a single global
+  slope is non-identifiable (outdoor = 2 points at one distance); (5) the single
+  hard motion gate shatters slow runs into spurious pauses.
+
+**Harness rebuilt** (`algo/rollator_surface_classifier.py`, v2) around the honest
+rules: time-only baseline printed beside every model on every split; wheel-band
+(10–44 Hz) Schmitt-hysteresis + debounce motion gate (a lean with no roll produces
+no wheel vibration → not counted as travel); nested feature selection; leave-one-
+**surface**-out first with bootstrap CIs + identifiability gates; a `dist = v_hat·walk_t`
+log-domain speed model. On 07-04 it confirms the retraction: **no vibration model
+beats the ~23 % time-only baseline** (numbers shift with the gate — itself a finding:
+`walk_t` is gate-dependent and unvalidated).
+
+**Reframed #1 data gap: VARIABLE SPEED, above a 3rd surface.** A vibration odometer
+can only be validated where speed genuinely varies (a stopwatch wins at constant
+speed by construction). Today's asphalt reps *look* faster (durations 7–37 s ⇒ up to
+~3 ft/s), so the pending pull may finally provide the test — but if speeds are still
+~0.8 ft/s, the estimator stays **UNVALIDATED** regardless of surface count.
+
+**Decision rule (adopted):** ship the vibration odometer **only** if it beats *both*
+time-only *and* flat-norm on nested leave-one-surface-out across ≥3 surfaces at a real
+speed range. Otherwise ship **`active_min` + time-based distance** and label distance
+UNVALIDATED. Do **not** carry 16.9 % forward. Full asphalt-landing test checklist +
+graft ideas (log-domain speed fit, Jensen-bias correction, envelope-spectrum
+rev-rate cross-check, shrinkage-to-pooled-m) captured in the review output.
+
+### 3e. ✅ VALIDATED on the variable-speed 3-surface data (2026-07-05 pull)
+
+The 07-05 data pulled (53 sessions; 43 valid: polished 13 incl. 07-04, sidewalk 14,
+asphalt 11 walking + 5 pause) and — crucially — spans a **real speed range
+(0.55–3.08 ft/s, std 0.70)**, unlike the constant-speed 07-04 set. Run through the
+honest harness, the §3d retraction **reverses**: the vibration odometer now earns its
+keep. Fig G.
+
+- **The odometer significantly beats the stopwatch** once speed varies:
+  flat-norm **29.4 %** vs time-only **42.7 %** LOO; gap 95 % CI **[−22, −6] pp,
+  p = 0**. Nested feature selection now *picks flatness* (it refused to at constant
+  speed). This is the review's decision rule **passed**.
+- **Within a surface, raw vibration tracks distance well** (sidewalk 10.9 %,
+  asphalt 14.1 %, polished 23.0 % — all beating time-only 33–35 %): with roughness
+  fixed, amplitude ≈ speed. So the architecture is **classify surface → apply that
+  surface's vibration curve**.
+- **Realistic deploy** (nearest-centroid surface classifier **82 %**, in-fold →
+  per-surface curve): **26.3 % MAPE** — between the oracle ceiling **15.9 %**
+  (perfect classification) and label-free flat-norm 29.4 %. ~26 % is **walker
+  parity (22 %) territory**, out-of-sample, on 3 surfaces at real speed.
+- **Cold unseen surface (leave-one-surface-out):** flat-norm 26–41 % (polished 41,
+  sidewalk 26, asphalt 41) — generalizes past time-only on 2 of 3; the roughest
+  extreme (asphalt) is the weak spot (extrapolating roughness beyond training).
+- **Pause detection works:** the wheel-band hysteresis gate found every ~10 s pause
+  (2 bursts, 8–12 s gaps) **including the lean-during-pause run** — leaning
+  (frame load, no roll) produced no wheel vibration and did **not** leak fake travel.
+
+**Verdict:** distance is **no longer UNVALIDATED** — the surface-normalized vibration
+odometer is validated at **~26 % deploy MAPE** on variable-speed, 3-surface,
+out-of-sample data, with the honest harness. Highest-leverage next lever is the
+**surface classifier** (82 % → oracle 16 % if perfected; misclassification is the main
+error source). Remaining caveats: GT is still taped (not measured) distance; `walk_t`
+is gate-dependent; single mount / subject / rollator. Harness:
+`algo/rollator_surface_classifier.py`; result Fig G.
 
 ## 4. Proposed development arc
 
