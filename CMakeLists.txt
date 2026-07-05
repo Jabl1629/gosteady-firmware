@@ -19,4 +19,5 @@ target_sources_ifdef(CONFIG_GOSTEADY_CLOUD_ENABLE     app PRIVATE src/cloud.c sr
 target_sources_ifdef(CONFIG_NRF_FUEL_GAUGE            app PRIVATE src/battery.c)
 target_sources_ifdef(CONFIG_GOSTEADY_FORENSICS_ENABLE app PRIVATE src/forensics.c)
 target_sources_ifdef(CONFIG_GOSTEADY_SNIPPET_ENABLE   app PRIVATE src/snippet.c)
+target_sources_ifdef(CONFIG_GOSTEADY_PRODUCT_ROLLATOR app PRIVATE src/algo/gs_rollator_distance.c)
 target_include_directories(app PRIVATE src)

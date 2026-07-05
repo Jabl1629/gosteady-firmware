@@ -117,6 +117,15 @@ static bool               s_pipeline_seeded;
 static struct gs_pipeline_outputs s_pipeline_outputs;
 static bool               s_pipeline_outputs_valid;
 
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+/* Rollator wheeled-motion distance — a SEPARATE estimator from the walker's
+ * step/stride pipeline (frame-mount rollator has no step impulses). Fed the same
+ * mag_g stream; compile-gated so walker builds are byte-identical. */
+#include "algo/gs_rollator_distance.h"
+static struct gs_roll_distance s_roll_dist;
+static struct gs_roll_outputs  s_roll_outputs;
+#endif
+
 /* Phase 1.6 follow-up 2026-05-05: writer thread sets this on ENOSPC
  * from fs_write. Main thread polls via gosteady_session_flash_full()
  * and calls session_stop to close the session cleanly so the
@@ -328,6 +337,12 @@ static void writer_entry(void *p1, void *p2, void *p3)
 				if (!s_pipeline_seeded) {
 					gs_pipeline_session_start(&s_pipeline, mag_g);
 					s_pipeline_seeded = true;
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+					/* zero-IC reset (this first sample is also stepped
+					 * below, matching the reference's filter-from-zero). */
+					gs_roll_distance_reset(&s_roll_dist);
+					memset(&s_roll_outputs, 0, sizeof(s_roll_outputs));
+#endif
 					/* DIAG: confirm seed actually happened on
 					 * the first sample of every session. If this
 					 * line never logs but samples > 0 land, the
@@ -338,6 +353,9 @@ static void writer_entry(void *p1, void *p2, void *p3)
 						(double)mag_g);
 				}
 				gs_pipeline_step(&s_pipeline, mag_g);
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+				gs_roll_distance_step(&s_roll_dist, mag_g);
+#endif
 				/* Phase 3 auto-stop input: track consecutive
 				 * non-motion samples. The motion gate's
 				 * `in_motion` flag has its own 500 ms running
@@ -385,6 +403,18 @@ static void writer_entry(void *p1, void *p2, void *p3)
 			if (s_pipeline_seeded) {
 				gs_pipeline_finalize(&s_pipeline, &s_pipeline_outputs);
 				s_pipeline_outputs_valid = true;
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+				gs_roll_distance_finalize(&s_roll_dist, &s_roll_outputs);
+				/* uart0 bench diagnostic (mirrors walker ALGO_V1 lines): read
+				 * distance on-device over the console without needing cloud. */
+				LOG_INF("ROLL_DIST valid=%d dist_ft=%.2f gait_fts=%.2f flat=%.4f vib=%.3f walk_s=%.1f nact=%u%s",
+					(int)s_roll_outputs.valid, (double)s_roll_outputs.distance_ft,
+					(double)((s_roll_outputs.walk_t_s > 0.0f) ?
+						 s_roll_outputs.distance_ft / s_roll_outputs.walk_t_s : 0.0f),
+					(double)s_roll_outputs.flatness, (double)s_roll_outputs.vib_int,
+					(double)s_roll_outputs.walk_t_s, (unsigned)s_roll_outputs.n_active_windows,
+					s_roll_outputs.overflowed ? " OVERFLOW" : "");
+#endif
 			} else {
 				memset(&s_pipeline_outputs, 0,
 				       sizeof(s_pipeline_outputs));
@@ -703,6 +733,20 @@ int gosteady_session_stop(uint32_t *out_sample_count)
 		 * steps / too little walking time / saturated session) → JSON omits
 		 * the field, same as roughness_R. */
 		a.gait_speed_fts = o->gait_valid ? o->gait_speed_fts : (float)NAN;
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+		/* Rollator: the step-based distance/gait above are meaningless (no step
+		 * impulses). Override with the flat-norm vibration odometer. NaN when its
+		 * validity gate fails → the payload omits the field (active_min still ships). */
+		if (s_roll_outputs.valid) {
+			a.distance_ft    = s_roll_outputs.distance_ft;
+			a.gait_speed_fts = (s_roll_outputs.walk_t_s > 0.0f)
+				? s_roll_outputs.distance_ft / s_roll_outputs.walk_t_s
+				: (float)NAN;
+		} else {
+			a.distance_ft    = (float)NAN;
+			a.gait_speed_fts = (float)NAN;
+		}
+#endif
 		/* active_min: round half-up from motion_duration_s/60. Cap at the
 		 * portal-contract max (1440 = 24 h) defensively; sessions are
 		 * normally minutes long so this only matters if something pinned
@@ -911,6 +955,10 @@ static int session_writer_init(void)
 		 * stop time. */
 		LOG_INF("gs_pipeline_init: ok");
 	}
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+	gs_roll_distance_init(&s_roll_dist);   /* one-time: load coeffs; reset per session */
+	memset(&s_roll_outputs, 0, sizeof(s_roll_outputs));
+#endif
 	k_thread_create(&writer_thread, writer_stack, K_THREAD_STACK_SIZEOF(writer_stack),
 			writer_entry, NULL, NULL, NULL,
 			/* priority: lower than sampler's 5, above main loop */

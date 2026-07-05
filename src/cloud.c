@@ -1142,6 +1142,25 @@ static int build_activity_payload(const struct gosteady_activity *a,
 		n += m;
 	}
 
+#if defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
+	/* Rollator flat-norm distance + gait speed (optional). Confidence-gated:
+	 * omitted when the on-device validity gate failed (session.c set NaN) —
+	 * active_min always ships above. distance_ft is a within-resident trend
+	 * (~31% MAPE), not a precise odometer (spec §3e). */
+	if (isfinite((double)a->distance_ft)) {
+		int m = snprintf(buf + n, buflen - (size_t)n,
+				 ",\"distance_ft\":%.2f", (double)a->distance_ft);
+		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
+		n += m;
+	}
+	if (isfinite((double)a->gait_speed_fts)) {
+		int m = snprintf(buf + n, buflen - (size_t)n,
+				 ",\"gait_speed_fts\":%.2f", (double)a->gait_speed_fts);
+		if (m < 0 || (size_t)(n + m) >= buflen) { return -ENOMEM; }
+		n += m;
+	}
+#endif
+
 #if !defined(CONFIG_GOSTEADY_PRODUCT_ROLLATOR)
 	/* Walker-only optional stride metrics. Compile-gated (not sentinel-
 	 * gated) for rollator — see the function comment. The values still
