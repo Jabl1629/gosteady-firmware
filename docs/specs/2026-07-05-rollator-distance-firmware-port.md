@@ -130,3 +130,54 @@ the Python numbers.
 Surface classifier (ruled out — continuous flat-norm, §3f). Wheel-rotation odometry
 (ruled out, §3f). Steps (dropped for rollator). Runtime NV calibration (deferred to
 §5.1 outcome).
+
+## 8. Implementation status (2026-07-05) + flash/test runbook
+
+**P1 DONE — module + host-parity validated.** `src/algo/gs_rollator_distance.{c,h}`
++ `gs_rollator_params.h` (coeffs) + `algo/rollator_distance_ref.py` (golden
+reference, 31.7 % LOO). Host parity (`tests/host/test_rollator_distance.c`) across
+**all 44** valid 2026-07-04+05 walking sessions: distance & flatness max rel-err
+**0.02 %**, gate windows identical, valid 44/44. Two bugs fixed en route: the CMSIS
+biquad sign convention (a1,a2 negated vs scipy — matches `gs_biquad`) and window RMS
+= population std (mean-subtracted, = `np.std`; raw RMS ran ~10 % high on the HP band).
+
+**P2 DONE — integrated + builds.** Wired into `session.c` (per-session reset /
+per-sample step / finalize) + the activity payload (`cloud.c` emits `distance_ft` +
+`gait_speed_fts`, confidence-gated `isfinite`→omit) + `CMakeLists`, **all under
+`#if CONFIG_GOSTEADY_PRODUCT_ROLLATOR`** (walker builds byte-identical — every
+rollator ref verified compile-gated). Rollator capture image builds clean
+(`build_rollator_dist/merged.hex`, RAM 16 %). A uart0 `ROLL_DIST` line at session
+stop gives the on-device readout **without needing cloud**.
+
+**BLOCKED — flash.** The external J-Link Mini won't open a debug session (`nrfjprog`
+→ JLinkARM error −256 at DLL-open, identical for nRF91 and nRF53, persists after
+clearing stale holders; `--ids` still lists 802006700). Needs a **physical re-plug
+of the J-Link Mini** (and SW2 = nRF91) — can't be done headless. Also: distance
+needs *real motion*, so on-device accuracy needs the rollator **pushed** (a bench
+session only exercises the code path → `valid=0`).
+
+### Flash + test runbook (when the J-Link is back)
+```
+# 1. Re-plug the J-Link Mini USB; SW2 = nRF91. Verify it opens:
+nrfjprog -f NRF91 --snr 802006700 --deviceversion      # expect a version, not -256
+# 2. Flash the rollator distance image:
+nrfjprog -f NRF91 --recover --program build_rollator_dist/merged.hex --verify --reset --snr 802006700
+# 3. Watch uart0:
+screen /dev/cu.usbmodem*102 115200
+# 4. Record a session while PUSHING the rollator (capture_rollator.html BLE, or
+#    tools/control.py over uart1): START -> walk -> STOP.
+# 5. At STOP, uart0 prints:  ROLL_DIST valid=1 dist_ft=.. gait_fts=.. flat=.. walk_s=.. nact=..
+#    (stationary session -> valid=0, i.e. no travel counted — gating works.)
+# 6. Cross-check: pull the .dat, run the host C + golden reference on it:
+tools/pull_sessions.py --port /dev/cu.usbmodem1105 --out /tmp/verify
+cc -std=c99 -O2 -I src/algo tests/host/test_rollator_distance.c src/algo/gs_rollator_distance.c src/algo/gs_filters.c -lm -o /tmp/roll_test
+/tmp/roll_test /tmp/verify/<uuid>.dat      # should match the on-device ROLL_DIST line
+# 7. Restore the original capture image if needed:
+nrfjprog -f NRF91 --recover --program build_rollator_bench/merged.hex --verify --reset --snr 802006700
+```
+
+**Not yet done (post-flash / follow-up):** on-device flash + a pushed-rollator
+accuracy check; the cloud rollator build (`prj_rollator_cloud.conf`) to verify the
+payload path end-to-end (pre-existing RAM-overflow there, §C49 — the payload edit
+itself mirrors the walker's `isfinite`/`snprintf` and is low-risk); the
+generalization capture (§5.1) that gates compile-time vs NV calibration.
