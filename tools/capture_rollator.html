@@ -211,7 +211,7 @@
 
 <header>
   <div>
-    <h1>GoSteady Rollator Capture <small>(DT-1)</small></h1>
+    <h1>GoSteady Rollator Capture <small>(distance capture · 2026-07-05 · 36 runs)</small></h1>
     <div id="conn-state" class="disconnected">Disconnected</div>
   </div>
   <button id="conn-btn">Connect</button>
@@ -351,62 +351,62 @@
     operator:     'jace',
   };
 
-  // 39-run rollator matrix (3 surfaces x 13), from
-  // GoSteady_Rollator_Capture_Protocol_v1.md (DT-1). Keys match the
-  // annotation workbook columns exactly. Wheeled-motion additions vs the
-  // walker matrix: explicit 90-degree turns, brake_stop, heavy_lean (frame
-  // loading), park_brake_seated (seated-rest baseline).
+  // 2026-07-05 rollator DISTANCE-ESTIMATOR capture (v2). Straight-line
+  // walking runs only, to train/validate the surface-normalized vibration
+  // odometer — see docs/specs/2026-07-04-rollator-algorithm-scope.md.
+  // Matrix: 3 surfaces (polished < sidewalk < asphalt roughness ladder)
+  // x 3 speeds (slow/normal/fast) x 2 distances (20/40 ft) x 2 reps = 36 runs.
+  // No turns / s-curves / brake / lean / baselines this pass. Keys match the
+  // annotation workbook columns exactly. Surface & speed strings are device
+  // vocab (SURFACE incl. outdoor_asphalt; SPEED = slow|normal|fast).
   const RUNS = [
-    // Indoor polished concrete — runs 1..13
-    { idx: 1 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'warmup' },
-    { idx: 2 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 20, intended_speed: 'slow', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 3 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 4 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 20, intended_speed: 'fast', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 5 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'variance repeat' },
-    { idx: 6 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_long', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'long distance' },
-    { idx: 7 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_curve', intended_distance_ft: 20, intended_speed: 'normal', direction: 's_curve', run_type: 'normal', note: 'weave 2 cones' },
-    { idx: 8 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_turn', intended_distance_ft: 20, intended_speed: 'normal', direction: 'turn_left', run_type: 'turn_test', note: '90-degree left turn mid-course' },
-    { idx: 9 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_turn', intended_distance_ft: 20, intended_speed: 'normal', direction: 'turn_right', run_type: 'turn_test', note: '90-degree right turn mid-course' },
-    { idx: 10, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'brake_stop', note: 'full brake squeeze to stop ~mid-course; note brake@mm:ss' },
-    { idx: 11, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'heavy_lean', note: 'max comfortable weight on frame throughout' },
-    { idx: 12, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 0, intended_speed: 'slow', direction: 'straight', run_type: 'stationary_baseline', note: '30s parked, untouched' },
-    { idx: 13, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_concrete_A_straight', intended_distance_ft: 0, intended_speed: 'slow', direction: 'straight', run_type: 'park_brake_seated', note: '30s parking brake set, user seated on rollator; note sit@mm:ss' },
+    // ---- Indoor polished concrete (smoothest) — runs 1..12 ----
+    { idx: 1 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
+    { idx: 2 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 3 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 4 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 5 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 6 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 7 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 8 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 9 , group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 10, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 11, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 12, group: 'indoor_polished_concrete', surface: 'polished_concrete', course_id: 'rol_polished_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
 
-    // Outdoor concrete sidewalk — runs 14..26
-    { idx: 14, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'warmup' },
-    { idx: 15, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 20, intended_speed: 'slow', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 16, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 17, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 20, intended_speed: 'fast', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 18, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'variance repeat' },
-    { idx: 19, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_long', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'long distance' },
-    { idx: 20, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_curve', intended_distance_ft: 20, intended_speed: 'normal', direction: 's_curve', run_type: 'normal', note: 'weave 2 cones' },
-    { idx: 21, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_turn', intended_distance_ft: 20, intended_speed: 'normal', direction: 'turn_left', run_type: 'turn_test', note: '90-degree left turn mid-course' },
-    { idx: 22, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_turn', intended_distance_ft: 20, intended_speed: 'normal', direction: 'turn_right', run_type: 'turn_test', note: '90-degree right turn mid-course' },
-    { idx: 23, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'brake_stop', note: 'full brake squeeze to stop ~mid-course; note brake@mm:ss' },
-    { idx: 24, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'heavy_lean', note: 'max comfortable weight on frame throughout' },
-    { idx: 25, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 0, intended_speed: 'slow', direction: 'straight', run_type: 'stationary_baseline', note: '30s parked, untouched' },
-    { idx: 26, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_straight', intended_distance_ft: 0, intended_speed: 'slow', direction: 'straight', run_type: 'park_brake_seated', note: '30s parking brake set, user seated on rollator; note sit@mm:ss' },
+    // ---- Outdoor concrete sidewalk (medium) — runs 13..24 ----
+    { idx: 13, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
+    { idx: 14, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 15, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 16, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 17, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 18, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 19, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 20, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 21, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 22, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 23, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 24, group: 'outdoor_concrete_sidewalk', surface: 'outdoor_concrete', course_id: 'rol_sidewalk_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
 
-    // Indoor low-pile carpet — runs 27..39
-    { idx: 27, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 10, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'warmup' },
-    { idx: 28, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 20, intended_speed: 'slow', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 29, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 30, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 20, intended_speed: 'fast', direction: 'straight', run_type: 'normal', note: '' },
-    { idx: 31, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'variance repeat' },
-    { idx: 32, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_long', intended_distance_ft: 30, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'long distance' },
-    { idx: 33, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_curve', intended_distance_ft: 15, intended_speed: 'normal', direction: 's_curve', run_type: 'normal', note: 'weave 2 cones' },
-    { idx: 34, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_turn', intended_distance_ft: 20, intended_speed: 'normal', direction: 'turn_left', run_type: 'turn_test', note: '90-degree left turn mid-course' },
-    { idx: 35, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_turn', intended_distance_ft: 20, intended_speed: 'normal', direction: 'turn_right', run_type: 'turn_test', note: '90-degree right turn mid-course' },
-    { idx: 36, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'brake_stop', note: 'full brake squeeze to stop ~mid-course; note brake@mm:ss' },
-    { idx: 37, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'heavy_lean', note: 'max comfortable weight on frame throughout' },
-    { idx: 38, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 0, intended_speed: 'slow', direction: 'straight', run_type: 'stationary_baseline', note: '30s parked, untouched' },
-    { idx: 39, group: 'indoor_low_pile_carpet', surface: 'low_pile_carpet', course_id: 'rol_carpet_A_straight', intended_distance_ft: 0, intended_speed: 'slow', direction: 'straight', run_type: 'park_brake_seated', note: '30s parking brake set, user seated on rollator; note sit@mm:ss' },
+    // ---- Outdoor asphalt (roughest — the new 3rd surface) — runs 25..36 ----
+    { idx: 25, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1 · warmup' },
+    { idx: 26, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 27, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 28, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 29, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 30, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_20ft_straight', intended_distance_ft: 20, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 31, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 32, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'slow',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 33, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 34, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'normal', direction: 'straight', run_type: 'normal', note: 'rep 2' },
+    { idx: 35, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 1' },
+    { idx: 36, group: 'outdoor_asphalt', surface: 'outdoor_asphalt', course_id: 'rol_asphalt_40ft_straight', intended_distance_ft: 40, intended_speed: 'fast',   direction: 'straight', run_type: 'normal', note: 'rep 2' },
   ];
 
   const GROUP_LABEL = {
-    indoor_polished_concrete: 'Indoor polished concrete',
+    indoor_polished_concrete:  'Indoor polished concrete',
     outdoor_concrete_sidewalk: 'Outdoor concrete sidewalk',
-    indoor_low_pile_carpet:   'Indoor low-pile carpet',
+    outdoor_asphalt:           'Outdoor asphalt',
   };
 
   // ---- State --------------------------------------------------------
@@ -462,7 +462,7 @@
   // sandbox eviction), tier (3) gives a disk copy of any session that
   // ended in a fault.
 
-  const LOG_LS_KEY = 'gosteady_rollator_capture_log_v1';
+  const LOG_LS_KEY = 'gosteady_rollator_capture_log_2026_07_05';
   const LOG_MAX_ENTRIES = 10000;
   let logEntries = [];
   let logSaveTimer = null;
@@ -756,13 +756,13 @@
       for (const k of Object.keys(completions)) {
         snap[k] = completions[k].map(c => ({ ts: c.ts.toISOString() }));
       }
-      localStorage.setItem('gosteady_rollator_completions', JSON.stringify(snap));
+      localStorage.setItem('gosteady_rollator_completions_2026_07_05', JSON.stringify(snap));
     } catch (_) {}
   }
 
   function loadCompletions() {
     try {
-      const raw = localStorage.getItem('gosteady_rollator_completions');
+      const raw = localStorage.getItem('gosteady_rollator_completions_2026_07_05');
       if (!raw) return;
       const snap = JSON.parse(raw);
       for (const k of Object.keys(snap)) {
@@ -790,7 +790,7 @@
 
   // ---- POST-WALK notes ---------------------------------------------
 
-  const POST_WALK_LS_KEY = 'gosteady_rollator_post_walk_notes_v1';
+  const POST_WALK_LS_KEY = 'gosteady_rollator_post_walk_notes_2026_07_05';
 
   function persistPostWalkNotes() {
     try { localStorage.setItem(POST_WALK_LS_KEY, JSON.stringify(postWalkNotes)); }
