@@ -149,35 +149,37 @@ rollator ref verified compile-gated). Rollator capture image builds clean
 (`build_rollator_dist/merged.hex`, RAM 16 %). A uart0 `ROLL_DIST` line at session
 stop gives the on-device readout **without needing cloud**.
 
-**BLOCKED — flash.** The external J-Link Mini won't open a debug session (`nrfjprog`
-→ JLinkARM error −256 at DLL-open, identical for nRF91 and nRF53, persists after
-clearing stale holders; `--ids` still lists 802006700). Needs a **physical re-plug
-of the J-Link Mini** (and SW2 = nRF91) — can't be done headless. Also: distance
-needs *real motion*, so on-device accuracy needs the rollator **pushed** (a bench
-session only exercises the code path → `valid=0`).
-
-### Flash + test runbook (when the J-Link is back)
+**FLASHED + on-device verified (2026-07-05).** ⚠ **The standalone `nrfjprog` CLI is
+broken on this machine** — it's bound to the stale system-wide SEGGER JLink **V9.34a**
+(2020), which won't open the probe (`JLinkARM -256` at DLL-open). NOT a probe/cable
+fault: a full re-plug + killing every JLink process didn't help, and `JLinkExe`
+V9.34a opens the same probe fine (it just lacks the nRF9151 in its 2020 device DB).
+The working path is **`nrfutil device`** (device plugin 2.19.x bundles a current
+J-Link) — which is what nRF Connect for Desktop / the VS Code nRF extension use.
+Flash + verify sequence used:
 ```
-# 1. Re-plug the J-Link Mini USB; SW2 = nRF91. Verify it opens:
-nrfjprog -f NRF91 --snr 802006700 --deviceversion      # expect a version, not -256
-# 2. Flash the rollator distance image:
-nrfjprog -f NRF91 --recover --program build_rollator_dist/merged.hex --verify --reset --snr 802006700
-# 3. Watch uart0:
-screen /dev/cu.usbmodem*102 115200
-# 4. Record a session while PUSHING the rollator (capture_rollator.html BLE, or
-#    tools/control.py over uart1): START -> walk -> STOP.
-# 5. At STOP, uart0 prints:  ROLL_DIST valid=1 dist_ft=.. gait_fts=.. flat=.. walk_s=.. nact=..
-#    (stationary session -> valid=0, i.e. no travel counted — gating works.)
-# 6. Cross-check: pull the .dat, run the host C + golden reference on it:
-tools/pull_sessions.py --port /dev/cu.usbmodem1105 --out /tmp/verify
-cc -std=c99 -O2 -I src/algo tests/host/test_rollator_distance.c src/algo/gs_rollator_distance.c src/algo/gs_filters.c -lm -o /tmp/roll_test
-/tmp/roll_test /tmp/verify/<uuid>.dat      # should match the on-device ROLL_DIST line
-# 7. Restore the original capture image if needed:
-nrfjprog -f NRF91 --recover --program build_rollator_bench/merged.hex --verify --reset --snr 802006700
+~/.nrfutil/bin/nrfutil install device                                    # once
+~/.nrfutil/bin/nrfutil device device-info --serial-number 802006700      # confirm SW2=nRF91 -> "nRF9151"
+~/.nrfutil/bin/nrfutil device program --firmware build_rollator_dist/merged.hex \
+  --serial-number 802006700 --core Application \
+  --options chip_erase_mode=ERASE_ALL,ext_mem_erase_mode=ERASE_NONE,verify=VERIFY_READ,reset=RESET_SYSTEM
 ```
+On-device test (stationary desk session driven over uart1) — the new firmware logged
+on uart0:
+```
+ROLL_DIST valid=0 dist_ft=0.00 gait_fts=0.00 flat=0.0000 vib=0.099 walk_s=0.5 nact=1
+```
+proving the ported code runs + gates correctly (stationary → `valid=0`, distance
+omitted). The host C on the same pulled `.dat` printed identical `vib=0.0992,
+nact=1, valid=0` → **on-device == host == golden reference on real data**.
 
-**Not yet done (post-flash / follow-up):** on-device flash + a pushed-rollator
-accuracy check; the cloud rollator build (`prj_rollator_cloud.conf`) to verify the
-payload path end-to-end (pre-existing RAM-overflow there, §C49 — the payload edit
-itself mirrors the walker's `isfinite`/`snprintf` and is low-risk); the
+Restore point (original capture image), same nrfutil form:
+`… device program --firmware build_rollator_bench/merged.hex --serial-number 802006700 --core Application --options chip_erase_mode=ERASE_ALL,ext_mem_erase_mode=ERASE_NONE,reset=RESET_SYSTEM`
+
+**Not yet done (needs motion / follow-up):** a **pushed-rollator** session to
+exercise the *valid-distance* path on hardware (bench sessions only reach `valid=0`;
+confirm on-device `ROLL_DIST dist_ft` matches the host C on the pulled `.dat` and is
+near the taped distance); the cloud rollator build (`prj_rollator_cloud.conf`) to
+verify the payload path end-to-end (pre-existing RAM-overflow there, §C49 — the
+payload edit mirrors the walker's `isfinite`/`snprintf`, low-risk); the
 generalization capture (§5.1) that gates compile-time vs NV calibration.
