@@ -46,7 +46,7 @@ extern void gosteady_cloud_notify_deactivated(void);
 #define ACTIVATION_MAGIC      0x47535631u  /* 'GSV1' = GoSteady V1 activation */
 #define ACTIVATION_VERSION    1u
 
-#define MAX_CMD_ID_LEN        40   /* "act_<uuid>" + NUL */
+#define MAX_CMD_ID_LEN        41   /* "act_<uuid>" = 40 chars + NUL (was 40 → strncpy truncated the ack cmd_id by 1, breaking the cloud match) */
 #define MAX_ACTIVATED_AT_LEN  24   /* "YYYY-MM-DDTHH:MM:SSZ" + NUL */
 
 struct __attribute__((packed)) gs_activation_record {
@@ -54,7 +54,7 @@ struct __attribute__((packed)) gs_activation_record {
 	uint32_t version;
 	char     activated_at_iso[MAX_ACTIVATED_AT_LEN];
 	char     last_cmd_id[MAX_CMD_ID_LEN];
-	uint8_t  _reserved[16];
+	uint8_t  _reserved[15];  /* -1B: last_cmd_id grew 40→41 for the full cmd_id; record stays 88 B (offsets stable) */
 };
 _Static_assert(sizeof(struct gs_activation_record) == 88,
 	"gs_activation_record size drift");

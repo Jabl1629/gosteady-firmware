@@ -1113,7 +1113,7 @@ int main(void)
 	 * §C.2 (cloud's 24 h matching window keeps the echo meaningful for
 	 * a full day after the activate cmd was issued). */
 	{
-		char cmd_id[40];
+		char cmd_id[41];   /* full "act_<uuid>" (40) + NUL; must be >= MAX_CMD_ID_LEN */
 		if (gosteady_activation_get_last_cmd_id(cmd_id, sizeof(cmd_id)) == 0) {
 			gosteady_cloud_set_last_cmd_id(cmd_id);
 		}
