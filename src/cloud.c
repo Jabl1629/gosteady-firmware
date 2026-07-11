@@ -317,6 +317,16 @@ static void handle_activate_cmd(const struct app_cmd_json *c)
 	}
 	gosteady_cloud_set_last_cmd_id(c->cmd_id);
 	(void)write_reported_activated_at(c->ts);
+
+	/* Wake the heartbeat thread NOW so the last_cmd_id ack goes out within
+	 * seconds instead of waiting out the hourly cadence. Without this the
+	 * cloud's provisioned→active_monitoring transition — and the D2C app's
+	 * "getting set up" screen — lag up to a full HEARTBEAT_INTERVAL after the
+	 * claim (observed on the first prod activation, GS0002000001). The
+	 * activated branch treats an early wake as a harmless re-publish; PREACT
+	 * builds already ack via the wake-window→activated transition, so this is
+	 * belt-and-suspenders there. */
+	k_sem_give(&heartbeat_wake_sem);
 }
 
 /* Handle an inbound `wipe` cmd (added 2026-05-17 — see wipe.h for
