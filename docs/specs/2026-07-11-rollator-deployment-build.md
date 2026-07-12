@@ -1,7 +1,10 @@
 # Rollator deployment build — spec (DT-3)
 
-> **Date:** 2026-07-11 | **Status:** 🟡 build ready + fits; **runtime PREACT
-> validation OUTSTANDING (the gate below).** | **Owner:** firmware
+> **Date:** 2026-07-11 (updated 2026-07-12) | **Status:** 🟡 build + **shake-to-
+> activate VALIDATED on GS0002000001** (2026-07-12, coord §C58 — dark → shake →
+> BLUE wake window → green confirm → `active_monitoring`; pre-activation gate
+> holds, no green pre-claim). **Still owed:** rolling/false-trigger + on-battery
+> discharge (§5 checklist). | **Owner:** firmware
 > **Context:** the first real prod activation (GS0002000001, coord §C57 follow-up)
 > ran on the **bench** build `prj_rollator_cloud`. This spec covers the **deployment**
 > build (`prj_rollator_pilot`) — what changes, what's already proven, and the one
@@ -84,7 +87,7 @@ nrfutil device program --firmware build_rollator_pilot_<serial>/merged.hex \
 
 - [ ] **Dark at rest**: no LEDs/console idle; hourly (safety-net) heartbeat still lands in the prod Shadow.
 - [ ] **Pre-activation**: rolling the (unclaimed) rollator does **not** open a session (no green, no activity row).
-- [ ] **Shake-to-activate**: a deliberate shake opens the blue-pulse window; a claim in-window → green confirm → `active_monitoring` (tune the shake threshold for wheel-frame motion).
+- [x] **Shake-to-activate** ✅ (2026-07-12, GS0002000001): a firm shake opened the blue-pulse window (fresh Shadow heartbeat) + a queued activate cmd in-window → green confirm → `active_monitoring`. Walker-tuned threshold fires on a deliberate rollator shake. *Open:* how firm is needed, and whether normal rolling suffices.
 - [ ] **Post-activation auto-start**: normal walking auto-starts a session (green) → activity uploads (active_min/distance, no steps).
 - [ ] **Transit back-off / battery**: simulated shipping vibration doesn't hold the connection open / drain; on-battery discharge slope acceptable.
 
