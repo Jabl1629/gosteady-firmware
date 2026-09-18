@@ -4,14 +4,16 @@
  * Family Assistance Alert speaker prompts. Design + hardware facts live in
  * gosteady-portal/docs/specs/family-assistance-alert.md (§4.2–§4.5, §5.3):
  *
- *   - Wiring (prototype, R1): Thingy:91 X P1 expansion connector →
- *     SparkFun Qwiic-to-Gravity cable → DFR0534 Gravity header.
- *     P1 pin 4 (SCL side) = nRF9151 P0.19 = EXP_BOARD_PIN1 → module "R" → our TX
- *     P1 pin 3 (SDA side) = nRF9151 P0.18 = EXP_BOARD_PIN2 → module "T" → our RX
- *     (schematic PCA20065 v2.0.0, nRF9151 sheet). SB8 and SB9 MUST be cut
- *     so P0.19/P0.18 are no longer bridged onto the sensor I²C bus.
- *     uart1 is re-pinned to those GPIOs at 9600 8N1 by
+ *   - Wiring (prototype, R1 — bench-verified 2026-09-18): Thingy:91 X P1
+ *     expansion connector → SparkFun Qwiic-to-Gravity cable → DFR0534 header
+ *     "T R - +" (blue / yellow / black / red).
+ *     P1 pin 3 (SDA side) = nRF9151 P0.18 = EXP_BOARD_PIN2 → blue → "T" = our TX
+ *     P1 pin 4 (SCL side) = nRF9151 P0.19 = EXP_BOARD_PIN1 → yellow → "R" = our RX
+ *     (DFRobot labels T/R from the host's side.) Schematic PCA20065 v2.0.0.
+ *     SB8 and SB9 MUST be cut so P0.19/P0.18 are no longer bridged onto the
+ *     sensor I²C bus. uart1 is re-pinned to those GPIOs at 9600 8N1 by
  *     boards/assist_audio_uart1.overlay (the nRF9151 has no spare UARTE).
+ *     Module answers ~570 ms after power-up.
  *   - Power: the module hangs off VDD_EXP_BRD (nPM1300 BUCK2 3.3 V through
  *     load switch U14, enabled by P0.03 = `exp_board_enable`). It is powered
  *     ONLY while a prompt sequence runs — its idle current would otherwise

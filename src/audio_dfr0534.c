@@ -205,7 +205,7 @@ int gs_audio_init(void)
 	uart_irq_callback_set(audio_uart, uart_isr);
 	uart_irq_rx_enable(audio_uart);
 	s_inited = true;
-	LOG_INF("dfr0534 driver ready (uart1 → P1: TX P0.19, RX P0.18 @ 9600; VDD_EXP_BRD via P0.03, off)");
+	LOG_INF("dfr0534 driver ready (uart1 → P1: TX P0.18, RX P0.19 @ 9600; VDD_EXP_BRD via P0.03, off)");
 	return 0;
 }
 
@@ -270,7 +270,7 @@ int gs_audio_power_on(void)
 		LOG_INF("audio: powered, module answered after %lld ms (status=%u), volume=%u",
 			boot_ms, st, vol);
 	} else {
-		LOG_WRN("audio: powered but NO reply after %lld ms — check RX wiring (P0.18 ← module T) / SB9 cut; trying TX-only",
+		LOG_WRN("audio: powered but NO reply after %lld ms — check wiring (TX P0.18 → module T, RX P0.19 ← module R) / SB8+SB9 cut; trying TX-only",
 			boot_ms);
 	}
 	k_mutex_unlock(&s_lock);

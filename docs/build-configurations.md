@@ -187,7 +187,7 @@ Button → DFR0534 speaker harness with a **stub cloud** (no MQTT, no certs), fo
 the Family Assistance Alert FA-0/FA-1 work (portal spec
 `docs/specs/family-assistance-alert.md`). Applies on top of `prj.conf` and
 needs a devicetree overlay too — uart1 is re-pinned from the nRF5340 bridge to
-the P1 expansion connector (TX **P0.19**, RX **P0.18**, 9600 baud):
+the P1 expansion connector (TX **P0.18**, RX **P0.19**, 9600 baud — bench-verified 2026-09-18, coord §C63.6):
 
 ```bash
 west build -b thingy91x/nrf9151/ns -d build_assist_bench -p always -- \
@@ -210,7 +210,7 @@ bench posture, no cloud stack. Version string stays on the walker bench cascade
 (`0.17.0-time-psm`); no cloud publish happens from this image.
 
 **Hardware gate before flashing:** SB8 and SB9 must be **cut** first. The overlay
-drives P0.19 as push-pull UART TX from boot; with the bridges closed that pin is
+drives P0.18 as push-pull UART TX from boot; with the bridges closed that pin is
 shorted to the sensor-bus SCL and would fight the I²C master (ADXL367 +
 nPM1300). Prompts: `tools/load_dfr0534_prompts.sh /Volumes/<module>` (module on
 micro-USB; track index = copy order — see `audio/prompts/MANIFEST.md`).
