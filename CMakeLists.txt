@@ -6,7 +6,6 @@ project(gosteady_firmware LANGUAGES C)
 target_sources(app PRIVATE
   src/main.c
   src/session.c
-  src/dump.c
   src/control.c
   src/cellular.c
   src/algo/gs_filters.c
@@ -20,4 +19,11 @@ target_sources_ifdef(CONFIG_NRF_FUEL_GAUGE            app PRIVATE src/battery.c)
 target_sources_ifdef(CONFIG_GOSTEADY_FORENSICS_ENABLE app PRIVATE src/forensics.c)
 target_sources_ifdef(CONFIG_GOSTEADY_SNIPPET_ENABLE   app PRIVATE src/snippet.c)
 target_sources_ifdef(CONFIG_GOSTEADY_PRODUCT_ROLLATOR app PRIVATE src/algo/gs_rollator_distance.c)
+# The uart1 dump channel is unavailable when uart1 carries the DFR0534 audio
+# transport (Family Assistance Alert, R1).
+if(NOT CONFIG_GOSTEADY_ASSIST_AUDIO_XPORT_UART1)
+  target_sources(app PRIVATE src/dump.c)
+endif()
+target_sources_ifdef(CONFIG_GOSTEADY_ASSIST_ENABLE       app PRIVATE src/assist.c)
+target_sources_ifdef(CONFIG_GOSTEADY_ASSIST_AUDIO        app PRIVATE src/audio_dfr0534.c)
 target_include_directories(app PRIVATE src)

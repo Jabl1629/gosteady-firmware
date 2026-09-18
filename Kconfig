@@ -322,4 +322,99 @@ config GOSTEADY_FORENSICS_ENABLE
 	  beyond CONFIG_WDT_DISABLE_AT_BOOT semantics, or if a long-running
 	  test stalls the supervisor). Cloud + field builds opt in.
 
+# ── Family Assistance Alert (portal spec family-assistance-alert.md) ──────
+# Assistance button (SW0) → spoken 20 s countdown on a DFR0534 speaker
+# module → gs/{serial}/assist request → cloud ack → "Contacted care circle".
+config GOSTEADY_ASSIST_ENABLE
+	bool "Family Assistance Alert (assistance button + countdown + request)"
+	default n
+	help
+	  Compiles src/assist.c and re-purposes SW0 (P0.26) as the assistance
+	  button — also under FIELD_MODE, where SW0 is otherwise unwired. The
+	  bench session-toggle on SW0 is retired in assistance builds.
+
+	  Bench harness: with GOSTEADY_ASSIST_STUB_CLOUD the cloud publish is
+	  simulated (no MQTT) so the button → speaker path can be validated
+	  standalone (FA-0/FA-1). Real transport lands with FA-2 in cloud.c.
+
+	  Set in prj_assist_bench.conf (bench) / prj_rollator_assist.conf (FA-6).
+
+if GOSTEADY_ASSIST_ENABLE
+
+config GOSTEADY_ASSIST_COUNTDOWN_S
+	int "Cancellation window before the request is sent (seconds)"
+	default 20
+	help
+	  PRD AST-FW-01/02: exactly 20 s in production. Shorter values only
+	  for bench iteration.
+
+config GOSTEADY_ASSIST_MIDPROMPT_S
+	int "Mid-countdown tone + prompt time (seconds after the press)"
+	default 10
+
+config GOSTEADY_ASSIST_ACK_WAIT_S
+	int "Seconds to wait for the cloud assist_ack per attempt"
+	default 30
+
+config GOSTEADY_ASSIST_STUB_CLOUD
+	bool "Bench stub: simulate the cloud ack (no MQTT)"
+	default y if !GOSTEADY_CLOUD_ENABLE
+	help
+	  Logs the would-be publish and delivers a simulated assist_ack after
+	  GOSTEADY_ASSIST_STUB_ACK_MS. The device boots ARMED in this mode.
+
+config GOSTEADY_ASSIST_STUB_ACK_MS
+	int "Stub cloud: simulated ack latency (ms)"
+	depends on GOSTEADY_ASSIST_STUB_CLOUD
+	default 2000
+
+config GOSTEADY_ASSIST_AUDIO
+	bool "DFR0534 speaker prompts"
+	default n
+	select REGULATOR
+	help
+	  Compiles src/audio_dfr0534.c. The module is powered through the P1
+	  expansion-connector load switch (P0.03, exp_board_enable) only while a
+	  prompt sequence runs — mandatory for battery life (spec L8).
+
+if GOSTEADY_ASSIST_AUDIO
+
+choice GOSTEADY_ASSIST_AUDIO_XPORT
+	prompt "Audio module transport"
+	default GOSTEADY_ASSIST_AUDIO_XPORT_UART1
+
+config GOSTEADY_ASSIST_AUDIO_XPORT_UART1
+	bool "uart1 re-pinned to P1 (TX P0.19 / RX P0.18, 9600 baud) — R1"
+	help
+	  Requires boards/assist_audio_uart1.overlay and SB8/SB9 cut. The uart1
+	  dump/BLE-NUS bench channel (src/dump.c) is not built in this mode —
+	  the nRF9151 has no spare UARTE instance (uart2 ↔ i2c2, uart3 ↔ spi3).
+
+endchoice
+
+config GOSTEADY_ASSIST_AUDIO_VOLUME
+	int "Module volume (0-30)"
+	range 0 30
+	default 20
+
+config GOSTEADY_ASSIST_AUDIO_BOOT_MIN_MS
+	int "Minimum wait after powering the module before the first command (ms)"
+	default 200
+
+config GOSTEADY_ASSIST_AUDIO_BOOT_TIMEOUT_MS
+	int "Give up waiting for the module's first reply after (ms)"
+	default 3000
+
+config GOSTEADY_ASSIST_AUDIO_SELFTEST
+	bool "Bench: log the module's track count + index→filename map at boot"
+	default n
+	help
+	  Powers the module once at boot, queries the track count, selects each
+	  index and logs its short filename, then powers off. Validates the
+	  copy-order = index assumption (audio/prompts/MANIFEST.md).
+
+endif # GOSTEADY_ASSIST_AUDIO
+
+endif # GOSTEADY_ASSIST_ENABLE
+
 endmenu

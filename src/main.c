@@ -48,6 +48,13 @@
 #include "snippet.h"
 #endif
 
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+#include "assist.h"
+#endif
+#if defined(CONFIG_GOSTEADY_ASSIST_AUDIO)
+#include "audio_dfr0534.h"
+#endif
+
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
 
 #define HEARTBEAT_PERIOD_MS  1000
@@ -329,8 +336,14 @@ static void button_isr(const struct device *port, struct gpio_callback *cb, uint
 	ARG_UNUSED(port);
 	ARG_UNUSED(cb);
 	ARG_UNUSED(pins);
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+	/* Family Assistance Alert: SW0 is the assistance button; the bench
+	 * session toggle is retired in assistance builds (spec §5.1). */
+	gs_assist_button_isr();
+#else
 	/* Non-blocking give; ignore the "semaphore already given" case. */
 	k_sem_give(&button_press_sem);
+#endif
 }
 
 static int configure_button(void)
@@ -1054,10 +1067,13 @@ int main(void)
 	if (bmi270_set_active(false) == 0) {
 		LOG_INF("bmi270: suspended at boot (idle until session start)");
 	}
-	if (!IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
+	if (!IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE) ||
+	    IS_ENABLED(CONFIG_GOSTEADY_ASSIST_ENABLE)) {
 		/* Phase 5: SW0 is bench-only. Field deployments capture
 		 * sessions exclusively via Phase 2 motion-triggered
-		 * auto-start, so don't bother wiring the button. */
+		 * auto-start, so don't bother wiring the button — EXCEPT in
+		 * Family Assistance builds, where SW0 is the assistance
+		 * button and must work under FIELD_MODE too. */
 		if ((ret = configure_button()) < 0) { return ret; }
 	}
 	/* Phase 1a: arm the ADXL367 wake-on-motion path. Failure is
@@ -1129,6 +1145,27 @@ int main(void)
 	}
 #endif
 
+#if defined(CONFIG_GOSTEADY_ASSIST_AUDIO)
+	/* Family Assistance Alert: DFR0534 speaker driver (module stays
+	 * unpowered until an incident). Non-fatal — prompts just go silent. */
+	if (gs_audio_init() < 0) {
+		LOG_WRN("audio init failed — assistance prompts disabled");
+	}
+#if defined(CONFIG_GOSTEADY_ASSIST_AUDIO_SELFTEST)
+	else if (gs_audio_power_on() == 0) {
+		(void)gs_audio_selftest();
+		gs_audio_power_off();
+	} else {
+		gs_audio_power_off();
+	}
+#endif
+#endif
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+	if (gs_assist_start() < 0) {
+		LOG_WRN("assist thread failed to start — assistance button inert");
+	}
+#endif
+
 	/* Start the 100 Hz sampler after all config is done. */
 	k_thread_create(&sampler_thread, sampler_stack, K_THREAD_STACK_SIZEOF(sampler_stack),
 			sampler_entry, NULL, NULL, NULL,
@@ -1146,6 +1183,7 @@ int main(void)
 			6, 0, K_NO_WAIT);
 	k_thread_name_set(&auto_start_thread, "auto_start");
 
+#if !defined(CONFIG_GOSTEADY_ASSIST_AUDIO_XPORT_UART1)
 	if (!IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
 		/* Phase 5: uart1 dump channel is bench-only. Skipping in
 		 * field mode also gates off the BLE NUS START path, since
@@ -1157,6 +1195,10 @@ int main(void)
 			LOG_WRN("dump channel failed to start — file pull disabled");
 		}
 	}
+#else
+	/* uart1 carries the DFR0534 audio transport (Family Assistance
+	 * Alert R1) — the dump/BLE-NUS channel is not built. */
+#endif
 
 	/* M10.7.2: bring up nPM1300 fuel gauge so cloud heartbeat can publish
 	 * real battery_pct/battery_mv instead of the M12.1c.1 placeholder.
@@ -1189,6 +1231,8 @@ int main(void)
 	}
 
 	LOG_INF("Bring-up complete. %s",
+		IS_ENABLED(CONFIG_GOSTEADY_ASSIST_ENABLE) ?
+		"ASSIST: press SW0 for the assistance countdown." :
 		IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE) ?
 		"FIELD_MODE: motion-driven autonomous capture only." :
 		"Press SW0 to start/stop a session.");
@@ -1205,7 +1249,12 @@ int main(void)
 		}
 
 		if (!gosteady_session_is_active()) {
-			if (!IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE)) {
+			bool bench_blink = !IS_ENABLED(CONFIG_GOSTEADY_FIELD_MODE);
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+			/* The assist thread owns the RGB LED during an incident. */
+			bench_blink = bench_blink && !gs_assist_is_active();
+#endif
+			if (bench_blink) {
 				/* Bench: purple blink (red+blue toggle),
 				 * 1 Hz heartbeat log + motion-counter
 				 * delta. All silenced in FIELD_MODE per
