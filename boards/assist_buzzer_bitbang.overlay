@@ -1,0 +1,30 @@
+/*
+ * Family Assistance Alert — SparkFun Qwiic Buzzer on the 2026-09-18 BENCH UNIT
+ * whose SB8/SB9 were cut for the (since-retired) speaker experiment. With the
+ * bridges open, P1 pins 3/4 are the dedicated GPIOs P0.18 (SDA side) and P0.19
+ * (SCL side), isolated from i2c2. A bit-banged I²C master on those two pins
+ * (Zephyr `gpio-i2c`, open-drain, through the TXS0102 which is I²C-native)
+ * drives the same `qwiic_buzzer` node, so no code differs from the i2c2 build.
+ *
+ * Use ONLY on a board with SB8/SB9 cut. Unmodified boards use
+ * boards/assist_buzzer_i2c2.overlay instead.
+ * Apply with: -DEXTRA_DTC_OVERLAY_FILE=boards/assist_buzzer_bitbang.overlay
+ */
+
+/ {
+	bitbang_i2c: gpio-i2c {
+		compatible = "gpio-i2c";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		sda-gpios = <&gpio0 18 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		scl-gpios = <&gpio0 19 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		clock-frequency = <I2C_BITRATE_STANDARD>;
+
+		qwiic_buzzer: buzzer@34 {
+			compatible = "sparkfun,qwiic-buzzer";
+			reg = <0x34>;
+			status = "okay";
+		};
+	};
+};

@@ -50,9 +50,7 @@
 
 #if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
 #include "assist.h"
-#endif
-#if defined(CONFIG_GOSTEADY_ASSIST_AUDIO)
-#include "audio_dfr0534.h"
+#include "feedback.h"
 #endif
 
 LOG_MODULE_REGISTER(gosteady, LOG_LEVEL_INF);
@@ -1145,22 +1143,17 @@ int main(void)
 	}
 #endif
 
-#if defined(CONFIG_GOSTEADY_ASSIST_AUDIO)
-	/* Family Assistance Alert: DFR0534 speaker driver (module stays
-	 * unpowered until an incident). Non-fatal — prompts just go silent. */
-	if (gs_audio_init() < 0) {
-		LOG_WRN("audio init failed — assistance prompts disabled");
-	}
-#if defined(CONFIG_GOSTEADY_ASSIST_AUDIO_SELFTEST)
-	else if (gs_audio_power_on() == 0) {
-		(void)gs_audio_selftest();
-		gs_audio_power_off();
-	} else {
-		gs_audio_power_off();
-	}
-#endif
-#endif
 #if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+	/* Family Assistance Alert: feedback device (buzzer / archived speaker)
+	 * stays unpowered until an incident. Non-fatal — LED-only fallback. */
+	if (gs_feedback_init() < 0) {
+		LOG_WRN("feedback init failed — assistance runs LED-only");
+	}
+#if defined(CONFIG_GOSTEADY_ASSIST_FEEDBACK_SELFTEST)
+	else {
+		(void)gs_feedback_selftest();
+	}
+#endif
 	if (gs_assist_start() < 0) {
 		LOG_WRN("assist thread failed to start — assistance button inert");
 	}
@@ -1196,8 +1189,8 @@ int main(void)
 		}
 	}
 #else
-	/* uart1 carries the DFR0534 audio transport (Family Assistance
-	 * Alert R1) — the dump/BLE-NUS channel is not built. */
+	/* uart1 carries the archived DFR0534 speaker transport — the
+	 * dump/BLE-NUS channel is not built in that image. */
 #endif
 
 	/* M10.7.2: bring up nPM1300 fuel gauge so cloud heartbeat can publish

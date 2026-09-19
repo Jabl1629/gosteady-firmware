@@ -1,0 +1,10 @@
+# SparkFun Qwiic Buzzer (BOB-24474): ATtiny84-driven magnetic buzzer with an
+# I2C register interface (default address 0x34). No Zephyr driver — the
+# GoSteady feedback layer (src/feedback_buzzer.c) talks to it directly via
+# I2C_DT_SPEC_GET on this node.
+
+description: SparkFun Qwiic Buzzer (BOB-24474)
+
+compatible: "sparkfun,qwiic-buzzer"
+
+include: i2c-device.yaml

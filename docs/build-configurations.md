@@ -181,39 +181,52 @@ deployment (memo Q3 / spec A3, a DT-3 item).
 
 ---
 
-### Family Assistance bench harness — `prj_assist_bench.conf` (2026-09-18)
+### Family Assistance bench harness — `prj_assist_bench.conf` (2026-09-18, v0.4 buzzer)
 
-Button → DFR0534 speaker harness with a **stub cloud** (no MQTT, no certs), for
+Button → **Qwiic buzzer** harness with a **stub cloud** (no MQTT, no certs), for
 the Family Assistance Alert FA-0/FA-1 work (portal spec
-`docs/specs/family-assistance-alert.md`). Applies on top of `prj.conf` and
-needs a devicetree overlay too — uart1 is re-pinned from the nRF5340 bridge to
-the P1 expansion connector (TX **P0.18**, RX **P0.19**, 9600 baud — bench-verified 2026-09-18, coord §C63.6):
+`docs/specs/family-assistance-alert.md` v0.4, coord §C64). Pressing SW0 runs the
+real 20 s beep countdown (hold 3 s to cancel) and a simulated `assist_ack`.
+Applies on top of `prj.conf` plus ONE devicetree overlay chosen by the board:
 
 ```bash
+# unmodified Thingy:91 X (SB8/SB9 intact) — buzzer on the sensor I²C bus via P1
 west build -b thingy91x/nrf9151/ns -d build_assist_bench -p always -- \
   -DEXTRA_CONF_FILE=prj_assist_bench.conf \
-  -DEXTRA_DTC_OVERLAY_FILE=boards/assist_audio_uart1.overlay
+  -DEXTRA_DTC_OVERLAY_FILE=boards/assist_buzzer_i2c2.overlay
+
+# the 2026-09-18 bench unit whose SB8/SB9 were CUT — bit-banged I²C on P0.18/P0.19
+west build -b thingy91x/nrf9151/ns -d build_assist_bench_bitbang -p always -- \
+  -DEXTRA_CONF_FILE=prj_assist_bench.conf \
+  -DEXTRA_DTC_OVERLAY_FILE=boards/assist_buzzer_bitbang.overlay
 ```
 
 | Symbol | Value | Effect |
 |---|---|---|
 | `GOSTEADY_ASSIST_ENABLE` | y | `src/assist.c`; SW0 = assistance button (session toggle retired) |
-| `GOSTEADY_ASSIST_AUDIO` + `_XPORT_UART1` | y | `src/audio_dfr0534.c` on uart1; **`src/dump.c` is not built** (no dump/BLE-NUS channel in this image) |
+| `GOSTEADY_ASSIST_FEEDBACK_BUZZER` | y (choice) | `src/feedback_buzzer.c` — SparkFun Qwiic Buzzer BOB-24474 at 0x34 on the `qwiic_buzzer` DT node; `select REGULATOR` |
+| `GOSTEADY_ASSIST_CANCEL_HOLD_MS` | 3000 | press-and-hold cancel threshold |
+| `GOSTEADY_ASSIST_BUZZER_VOLUME` / `_FREQ_HZ` | 4 / 2730 | loudest setting, resonant pitch |
 | `GOSTEADY_ASSIST_STUB_CLOUD` | y (auto when `!CLOUD_ENABLE`) | simulated `assist_ack` 2 s after the "publish"; device boots armed |
-| `GOSTEADY_ASSIST_AUDIO_SELFTEST` | y | boot-time power-up + track-count + index→filename log, then power off |
-| `REGULATOR` | y (selected) | `exp_board_enable` (P0.03) load switch = speaker power gate |
+| `GOSTEADY_ASSIST_FEEDBACK_SELFTEST` | y | boot-time power-up + ID check + chirp, then power off |
+| `REGULATOR` | y (selected) | `exp_board_enable` (P0.03) load switch = buzzer power gate |
 | `DATE_TIME` / `DATE_TIME_NTP` | y / n | base `prj.conf` no longer links without `date_time` (0.17.0); NITZ only here |
 | `GOSTEADY_MOTION_AUTOSTART` | n | keep sessions out of the way while the device is handled |
+| `I2C_GPIO` | auto (bit-bang overlay only) | Zephyr `gpio-i2c` master on P0.18/P0.19 |
 
-Measured 2026-09-18: app image FLASH 18.4 %, **RAM 114,944 B (50.4 %)** —
-bench posture, no cloud stack. Version string stays on the walker bench cascade
-(`0.17.0-time-psm`); no cloud publish happens from this image.
+Measured 2026-09-18: bit-bang bench image FLASH 19.2 %, **RAM 120,608 B
+(52.9 %)**; i2c2 image and the archived speaker image build clean as
+regression. Version string stays on the walker bench cascade
+(`0.17.0-time-psm`); no cloud publish happens from these images.
 
-**Hardware gate before flashing:** SB8 and SB9 must be **cut** first. The overlay
-drives P0.18 as push-pull UART TX from boot; with the bridges closed that pin is
-shorted to the sensor-bus SCL and would fight the I²C master (ADXL367 +
-nPM1300). Prompts: `tools/load_dfr0534_prompts.sh /Volumes/<module>` (module on
-micro-USB; track index = copy order — see `audio/prompts/MANIFEST.md`).
+**Archived speaker variant** — `prj_assist_speaker_bench.conf` +
+`boards/assist_audio_uart1.overlay` (build dir `build_assist_speaker_bench`):
+the DFR0534 spoken-prompt path, bench-proven 2026-09-18 (coord §C63.6) and
+retired the same day. Selects `GOSTEADY_ASSIST_FEEDBACK_SPEAKER` →
+`GOSTEADY_ASSIST_AUDIO` + `_XPORT_UART1` (uart1 re-pinned to TX P0.18 / RX
+P0.19; `src/dump.c` not built). **Only on a board with SB8/SB9 cut** — the
+overlay drives P0.18 as push-pull UART TX from boot and would fight the I²C
+bus on an unmodified board. Prompts: `tools/load_dfr0534_prompts.sh`.
 
 ---
 

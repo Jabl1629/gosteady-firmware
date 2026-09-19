@@ -1,0 +1,18 @@
+/*
+ * Family Assistance Alert — SparkFun Qwiic Buzzer (BOB-24474) on the P1 Qwiic
+ * connector of an UNMODIFIED Thingy:91 X (SB8/SB9 intact): P1 pins 3/4 are the
+ * sensor I²C bus (i2c2, SDA P0.09 / SCL P0.08) through the TXS0102 level
+ * shifter. Bus power for the buzzer board is VDD_EXP_BRD, switched by P0.03
+ * (`exp_board_enable`) — the feedback layer powers it only during an incident.
+ *
+ * This is the production-representative wiring (spec family-assistance-alert.md
+ * v0.4 §4). Apply with: -DEXTRA_DTC_OVERLAY_FILE=boards/assist_buzzer_i2c2.overlay
+ */
+
+&i2c2 {
+	qwiic_buzzer: buzzer@34 {
+		compatible = "sparkfun,qwiic-buzzer";
+		reg = <0x34>;
+		status = "okay";
+	};
+};

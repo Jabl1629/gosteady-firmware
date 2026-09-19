@@ -323,8 +323,8 @@ config GOSTEADY_FORENSICS_ENABLE
 	  test stalls the supervisor). Cloud + field builds opt in.
 
 # ── Family Assistance Alert (portal spec family-assistance-alert.md) ──────
-# Assistance button (SW0) → spoken 20 s countdown on a DFR0534 speaker
-# module → gs/{serial}/assist request → cloud ack → "Contacted care circle".
+# Assistance button (SW0) → 20 s beep countdown (hold 3 s to cancel) →
+# gs/{serial}/assist request → cloud ack → confirmation tone.
 config GOSTEADY_ASSIST_ENABLE
 	bool "Family Assistance Alert (assistance button + countdown + request)"
 	default n
@@ -334,7 +334,7 @@ config GOSTEADY_ASSIST_ENABLE
 	  bench session-toggle on SW0 is retired in assistance builds.
 
 	  Bench harness: with GOSTEADY_ASSIST_STUB_CLOUD the cloud publish is
-	  simulated (no MQTT) so the button → speaker path can be validated
+	  simulated (no MQTT) so the button → feedback path can be validated
 	  standalone (FA-0/FA-1). Real transport lands with FA-2 in cloud.c.
 
 	  Set in prj_assist_bench.conf (bench) / prj_rollator_assist.conf (FA-6).
@@ -345,12 +345,24 @@ config GOSTEADY_ASSIST_COUNTDOWN_S
 	int "Cancellation window before the request is sent (seconds)"
 	default 20
 	help
-	  PRD AST-FW-01/02: exactly 20 s in production. Shorter values only
-	  for bench iteration.
+	  PRD AST-FW-01: exactly 20 s in production. Shorter values only for
+	  bench iteration.
 
 config GOSTEADY_ASSIST_MIDPROMPT_S
-	int "Mid-countdown tone + prompt time (seconds after the press)"
+	int "Countdown phase change (seconds after the press)"
 	default 10
+	help
+	  Cadence switches from one beep per second to a double beep (spoken
+	  "10 seconds" prompt on the archived speaker backend).
+
+config GOSTEADY_ASSIST_CANCEL_HOLD_MS
+	int "Press-and-hold duration that cancels the countdown (ms)"
+	default 3000
+	help
+	  Holding the button this long at any point in the countdown — including
+	  never releasing the initial press — cancels the request (PRD V2.3
+	  amendment 2026-09-18). A steady low tone starts after ~0.6 s of holding
+	  so the user knows the hold is registering.
 
 config GOSTEADY_ASSIST_ACK_WAIT_S
 	int "Seconds to wait for the cloud assist_ack per attempt"
@@ -368,14 +380,62 @@ config GOSTEADY_ASSIST_STUB_ACK_MS
 	depends on GOSTEADY_ASSIST_STUB_CLOUD
 	default 2000
 
-config GOSTEADY_ASSIST_AUDIO
-	bool "DFR0534 speaker prompts"
-	default n
+choice GOSTEADY_ASSIST_FEEDBACK
+	prompt "User feedback device"
+	default GOSTEADY_ASSIST_FEEDBACK_BUZZER
+
+config GOSTEADY_ASSIST_FEEDBACK_BUZZER
+	bool "SparkFun Qwiic Buzzer (BOB-24474) on the P1 Qwiic connector — product direction"
 	select REGULATOR
 	help
-	  Compiles src/audio_dfr0534.c. The module is powered through the P1
-	  expansion-connector load switch (P0.03, exp_board_enable) only while a
-	  prompt sequence runs — mandatory for battery life (spec L8).
+	  src/feedback_buzzer.c: beep cadences over I²C. Needs the
+	  `qwiic_buzzer` devicetree node: boards/assist_buzzer_i2c2.overlay on
+	  an unmodified board (SB8/SB9 intact, buzzer on i2c2) or
+	  boards/assist_buzzer_bitbang.overlay on a board whose SB8/SB9 were cut
+	  (bit-banged I²C on P0.18/P0.19). Powered only during an incident via
+	  exp_board_enable (P0.03).
+
+config GOSTEADY_ASSIST_FEEDBACK_SPEAKER
+	bool "DFR0534 MP3 speaker with spoken prompts (archived, bench-proven 2026-09-18)"
+	select GOSTEADY_ASSIST_AUDIO
+	help
+	  src/feedback_speaker.c over src/audio_dfr0534.c. Retired as the
+	  product direction (size + BOM); kept selectable. Requires
+	  boards/assist_audio_uart1.overlay and SB8/SB9 cut.
+
+config GOSTEADY_ASSIST_FEEDBACK_NONE
+	bool "LED only (no audible feedback)"
+
+endchoice
+
+config GOSTEADY_ASSIST_FEEDBACK_SELFTEST
+	bool "Bench: power the feedback device at boot, identify it, chirp, power off"
+	default n
+	help
+	  Buzzer: ID register + two short chirps. Speaker: track count + index→
+	  filename map (validates copy order, audio/prompts/MANIFEST.md).
+
+config GOSTEADY_ASSIST_BUZZER_VOLUME
+	int "Qwiic Buzzer volume (1 quietest … 4 loudest)"
+	depends on GOSTEADY_ASSIST_FEEDBACK_BUZZER
+	range 1 4
+	default 4
+	help
+	  ~95 mA while sounding at 4 (SparkFun). Rides VDD_EXP_BRD (BUCK2, 200 mA).
+
+config GOSTEADY_ASSIST_BUZZER_FREQ_HZ
+	int "Qwiic Buzzer cadence pitch (Hz)"
+	depends on GOSTEADY_ASSIST_FEEDBACK_BUZZER
+	default 2730
+	help
+	  2730 Hz is the magnetic element's resonant (loudest) frequency.
+
+config GOSTEADY_ASSIST_AUDIO
+	bool
+	select REGULATOR
+	help
+	  Hidden: compiles the DFR0534 driver (src/audio_dfr0534.c). Selected by
+	  GOSTEADY_ASSIST_FEEDBACK_SPEAKER.
 
 if GOSTEADY_ASSIST_AUDIO
 
@@ -384,7 +444,7 @@ choice GOSTEADY_ASSIST_AUDIO_XPORT
 	default GOSTEADY_ASSIST_AUDIO_XPORT_UART1
 
 config GOSTEADY_ASSIST_AUDIO_XPORT_UART1
-	bool "uart1 re-pinned to P1 (TX P0.19 / RX P0.18, 9600 baud) — R1"
+	bool "uart1 re-pinned to P1 (TX P0.18 / RX P0.19, 9600 baud) — R1"
 	help
 	  Requires boards/assist_audio_uart1.overlay and SB8/SB9 cut. The uart1
 	  dump/BLE-NUS bench channel (src/dump.c) is not built in this mode —
@@ -404,14 +464,6 @@ config GOSTEADY_ASSIST_AUDIO_BOOT_MIN_MS
 config GOSTEADY_ASSIST_AUDIO_BOOT_TIMEOUT_MS
 	int "Give up waiting for the module's first reply after (ms)"
 	default 3000
-
-config GOSTEADY_ASSIST_AUDIO_SELFTEST
-	bool "Bench: log the module's track count + index→filename map at boot"
-	default n
-	help
-	  Powers the module once at boot, queries the track count, selects each
-	  index and logs its short filename, then powers off. Validates the
-	  copy-order = index assumption (audio/prompts/MANIFEST.md).
 
 endif # GOSTEADY_ASSIST_AUDIO
 
