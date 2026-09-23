@@ -17,6 +17,9 @@
 
 #include "control.h"
 #include "session.h"
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+#include "assist.h"   /* bench hook: PRESS injects an assistance-button press */
+#endif
 
 #include <zephyr/kernel.h>
 #include <zephyr/data/json.h>
@@ -239,7 +242,8 @@ bool gosteady_control_recognises(const char *line)
 {
 	return strncmp(line, "START", 5) == 0 ||
 	       strncmp(line, "STOP",  4) == 0 ||
-	       strncmp(line, "STATUS", 6) == 0;
+	       strncmp(line, "STATUS", 6) == 0 ||
+	       strcmp(line, "PRESS") == 0;
 }
 
 int gosteady_control_execute(const char *line, char *out, size_t out_sz)
@@ -256,6 +260,17 @@ int gosteady_control_execute(const char *line, char *out, size_t out_sz)
 		n = cmd_stop(out, out_sz);
 	} else if (strcmp(line, "STATUS") == 0) {
 		n = cmd_status(out, out_sz);
+	} else if (strcmp(line, "PRESS") == 0) {
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+		/* Family Assistance bench hook (spec §5.11): same entry point as the
+		 * button ISR, so the countdown/ack path runs without touching the
+		 * board. Hold-to-cancel still needs the physical button (the hold
+		 * detector polls the real GPIO). */
+		gs_assist_inject_press();
+		n = snprintk(out, out_sz, "OK press");
+#else
+		n = snprintk(out, out_sz, "ERR assist disabled");
+#endif
 	} else {
 		n = snprintk(out, out_sz, "ERR unknown");
 	}

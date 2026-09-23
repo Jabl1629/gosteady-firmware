@@ -78,6 +78,23 @@ static int reg_read_u8(uint8_t reg, uint8_t *val)
 	return i2c_write_read_dt(&buzzer, &reg, 1, val, 1);
 }
 
+/* Bench diagnostic: which addresses ACK on the buzzer's bus right now. */
+static void bus_scan(const char *tag)
+{
+	char found[96];
+	int n = 0;
+	for (uint8_t a = 0x08; a < 0x78; a++) {
+		uint8_t b;
+		if (i2c_read(buzzer.bus, &b, 1, a) == 0) {
+			n += snprintk(found + n, sizeof(found) - n, " 0x%02x", a);
+			if (n >= (int)sizeof(found) - 6) {
+				break;
+			}
+		}
+	}
+	LOG_INF("i2c scan (%s):%s", tag, n ? found : " no ACKs");
+}
+
 /* One burst: freq MSB/LSB, volume, duration MSB/LSB, then ACTIVE=1.
  * duration_ms == 0 keeps sounding until note_off(). */
 static int note_on(uint16_t freq_hz, uint16_t duration_ms, uint8_t volume)
@@ -148,9 +165,11 @@ int gs_feedback_begin(void)
 	/* ATtiny boot + EEPROM settings load: poll the ID register. */
 	int64_t t0 = k_uptime_get();
 	uint8_t id = 0;
+	int rrc = -1;
 	k_msleep(20);
 	while ((k_uptime_get() - t0) < BOOT_TIMEOUT_MS) {
-		if (reg_read_u8(REG_ID, &id) == 0 && id == DEVICE_ID) {
+		rrc = reg_read_u8(REG_ID, &id);
+		if (rrc == 0 && id == DEVICE_ID) {
 			s_present = true;
 			break;
 		}
@@ -165,7 +184,14 @@ int gs_feedback_begin(void)
 		LOG_INF("buzzer: powered, ID 0x%02x fw %u.%u after %lld ms", id, fw_major, fw_minor, boot_ms);
 		return 0;
 	}
-	LOG_WRN("buzzer: powered but no ID reply after %lld ms (last 0x%02x) — LED-only incident", boot_ms, id);
+	LOG_WRN("buzzer: powered but no ID reply after %lld ms (rc %d, last 0x%02x) — LED-only incident", boot_ms, rrc, id);
+	/* Diagnose: who answers with the rail on, then with it off (polarity check). */
+	bus_scan("rail on");
+	(void)regulator_disable(exp_pwr);
+	k_msleep(150);
+	bus_scan("rail off");
+	(void)regulator_enable(exp_pwr);
+	k_msleep(50);
 	return -EIO;
 }
 
@@ -280,6 +306,7 @@ int gs_feedback_selftest(void)
 		LOG_INF("buzzer selftest: chirp");
 		note(F_RES, 60, 60);
 		note(F_RES, 60, 0);
+		bus_scan("rail on, buzzer ok");
 	}
 	gs_feedback_end();
 	return rc;

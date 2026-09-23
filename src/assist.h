@@ -33,6 +33,9 @@ int gs_assist_start(void);
 /* ISR-safe: called from the SW0 GPIO callback on every press edge. */
 void gs_assist_button_isr(void);
 
+/* Bench hook: inject a debounced press (control channel "PRESS"). */
+void gs_assist_inject_press(void);
+
 /* True while an incident owns the LED/speaker (IDLE == false). Used by main.c
  * to suppress the bench purple blink. */
 bool gs_assist_is_active(void);

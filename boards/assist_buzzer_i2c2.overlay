@@ -16,3 +16,18 @@
 		status = "okay";
 	};
 };
+
+/* Bench experiment 2026-09-23: the Qwiic Buzzer's 2.2 k pull-ups to 3.3 V load
+ * the 1.8 V sensor bus through the TXS0102. High-drive lows on the nRF9151
+ * side (H0D1) recover the master's own low levels; the sensors' ACK lows
+ * still need the buzzer's pull-up jumper cut. */
+&i2c2_default {
+	group1 {
+		nordic,drive-mode = <NRF_DRIVE_H0D1>;
+	};
+};
+&i2c2_sleep {
+	group1 {
+		nordic,drive-mode = <NRF_DRIVE_H0D1>;
+	};
+};

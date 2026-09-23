@@ -68,6 +68,7 @@ static inline bool button_down(void)
 
 /* ---- state ---- */
 static K_SEM_DEFINE(press_sem, 0, 1);
+static atomic_t s_synthetic;   /* bench PRESS hook: bypass the pin re-read once */
 static K_SEM_DEFINE(ack_sem, 0, 1);
 static atomic_t s_active;
 static bool s_armed = IS_ENABLED(CONFIG_GOSTEADY_ASSIST_STUB_CLOUD);
@@ -94,6 +95,14 @@ static struct k_thread assist_thread;
 
 void gs_assist_button_isr(void)
 {
+	k_sem_give(&press_sem);
+}
+
+/* Bench hook (control channel "PRESS"): behaves like a debounced press without
+ * touching the GPIO. Hold-to-cancel still reads the real button. */
+void gs_assist_inject_press(void)
+{
+	atomic_set(&s_synthetic, 1);
 	k_sem_give(&press_sem);
 }
 
@@ -266,7 +275,11 @@ static void assist_entry(void *a, void *b, void *c)
 
 	for (;;) {
 		k_sem_take(&press_sem, K_FOREVER);
-		if (!debounced_press()) {
+		bool synthetic = atomic_cas(&s_synthetic, 1, 0);
+		if (synthetic) {
+			LOG_INF("assist: synthetic press (bench hook)");
+		}
+		if (!synthetic && !debounced_press()) {
 			continue;
 		}
 		int64_t t0 = k_uptime_get();
