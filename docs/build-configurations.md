@@ -244,3 +244,29 @@ larger changes than the doc.
 ---
 
 *Related: [`Kconfig`](../Kconfig) · overlays `prj*.conf` · [`GOSTEADY_CONTEXT.md`](../GOSTEADY_CONTEXT.md) (dev-unit live state) · `src/version.h` (cascade + changelog).*
+
+#### Bench results and hooks (2026-09-23, GS0002000003 — unmodified unit)
+
+- **Wiring truth:** P1's SDA/SCL sit behind the TXS0102 level shifter (1.8 V sensor
+  bus ↔ 3.3 V connector), powered by VDD_EXP_BRD. The Qwiic Buzzer's 2.2 k pull-ups
+  to 3.3 V loaded the 1.8 V bus through the shifter: with standard drive the master's
+  lows went marginal and the on-board sensors stopped ACKing whenever the rail was on.
+  `assist_buzzer_i2c2.overlay` now sets `nordic,drive-mode = <NRF_DRIVE_H0D1>` on the
+  i2c2 pins; with it every device ACKs with the rail on (0x14 0x1d 0x34 0x6b 0x76).
+  Cutting the buzzer's `I2C` jumper is optional extra margin.
+- **Ports on this Mac:** `/dev/cu.usbmodem1102` = uart0 console @ 115200 (DTR!),
+  `/dev/cu.usbmodem1105` = uart1 dump/control channel @ 1 Mbaud (bench builds only).
+- **Control-channel hooks** (uart1, newline-terminated): `PING` → `PONG`; `PRESS` →
+  synthetic debounced press (`gs_assist_inject_press`); `HOLD <ms>` → the button reads
+  as held for ms (`gs_assist_inject_hold`, compiled out under FIELD_MODE). Together they
+  script every countdown case; physical-button holds still work on top.
+- **Flash:** `nrfutil device program --firmware build_assist_bench/merged.hex --core
+  Application --serial-number 802006700 --options chip_erase_mode=ERASE_ALL,
+  ext_mem_erase_mode=ERASE_NONE,verify=VERIFY_READ,reset=RESET_SYSTEM` (nrfutil cannot
+  erase the nRF9151's external flash; LittleFS survives and stale `.dat` files are swept).
+- **Measured:** buzzer ID 0x5E fw 1.0 answers 82 ms after the rail comes up; press →
+  feedback ready +84 ms → mid-countdown +10.02 s → publish +20.03 s → stub ack + rising
+  tone +22.03 s. Hold-to-cancel: early hold cancels at +8.55 s; never-let-go cancels at
+  +3.31 s; 2 s hold released → countdown continues; **hold started at 18.6 s: send
+  deferred at T20, cancelled at +21.6 s; hold started at 19.3 s and released at 20.7 s:
+  sent at +20.72 s** (deferred-send rule, spec D21).

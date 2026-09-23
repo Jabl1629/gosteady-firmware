@@ -36,6 +36,9 @@ void gs_assist_button_isr(void);
 /* Bench hook: inject a debounced press (control channel "PRESS"). */
 void gs_assist_inject_press(void);
 
+/* Bench hook: the button reads as held for ms (control channel "HOLD <ms>"). */
+void gs_assist_inject_hold(uint32_t ms);
+
 /* True while an incident owns the LED/speaker (IDLE == false). Used by main.c
  * to suppress the bench purple blink. */
 bool gs_assist_is_active(void);

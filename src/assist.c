@@ -61,8 +61,17 @@ static void led(bool r, bool g, bool b)
 	(void)gpio_pin_set_dt(&led_blue, b);
 }
 
+#if !defined(CONFIG_GOSTEADY_FIELD_MODE)
+static int64_t s_fake_down_until;   /* bench HOLD hook: pretend the button is down until this uptime */
+#endif
+
 static inline bool button_down(void)
 {
+#if !defined(CONFIG_GOSTEADY_FIELD_MODE)
+	if (k_uptime_get() < s_fake_down_until) {
+		return true;
+	}
+#endif
 	return gpio_pin_get_dt(&button) == 1;
 }
 
@@ -104,6 +113,16 @@ void gs_assist_inject_press(void)
 {
 	atomic_set(&s_synthetic, 1);
 	k_sem_give(&press_sem);
+}
+
+/* Bench hook (control channel "HOLD <ms>"): the button reads as held for ms. */
+void gs_assist_inject_hold(uint32_t ms)
+{
+#if !defined(CONFIG_GOSTEADY_FIELD_MODE)
+	s_fake_down_until = k_uptime_get() + ms;
+#else
+	ARG_UNUSED(ms);
+#endif
 }
 
 bool gs_assist_is_active(void)
@@ -207,22 +226,38 @@ static bool run_countdown(int64_t t0)
 	bool mid_done = false;
 	int64_t next_tick = TICK_EARLY_MS;     /* first cadence beep at t+1 s */
 
+	bool deferred = false;
+
 	while (true) {
 		int64_t now = k_uptime_get() - t0;
-		if (now >= COUNTDOWN_MS) {
-			return false;
-		}
 
 		/* --- hold-to-cancel --- */
 		bool down = button_down();
 		if (down && !holding) {
 			holding = true;
 			held_since = k_uptime_get();
+			LOG_INF("assist: button held from t+%lld ms", now);
 		} else if (!down && holding) {
 			holding = false;
+			LOG_INF("assist: released after %lld ms hold at t+%lld ms",
+				k_uptime_get() - held_since, now);
 			if (hold_tone) {
 				gs_feedback_hold_tone(false);
 				hold_tone = false;
+			}
+		}
+
+		/* --- deadline: never transmit while the button is held. A hold in
+		 * progress at T20 defers the send until release (then send at once)
+		 * or cancels when it reaches CANCEL_HOLD_MS — bounded at 3 s. --- */
+		if (now >= COUNTDOWN_MS) {
+			if (!holding) {
+				return false;
+			}
+			if (!deferred) {
+				deferred = true;
+				LOG_INF("assist: T%d reached with the button held — send deferred",
+					CONFIG_GOSTEADY_ASSIST_COUNTDOWN_S);
 			}
 		}
 		if (holding) {

@@ -26,6 +26,7 @@
 #include <zephyr/logging/log.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 LOG_MODULE_REGISTER(gs_control, LOG_LEVEL_INF);
 
@@ -243,7 +244,8 @@ bool gosteady_control_recognises(const char *line)
 	return strncmp(line, "START", 5) == 0 ||
 	       strncmp(line, "STOP",  4) == 0 ||
 	       strncmp(line, "STATUS", 6) == 0 ||
-	       strcmp(line, "PRESS") == 0;
+	       strcmp(line, "PRESS") == 0 ||
+	       strncmp(line, "HOLD", 4) == 0;
 }
 
 int gosteady_control_execute(const char *line, char *out, size_t out_sz)
@@ -260,6 +262,15 @@ int gosteady_control_execute(const char *line, char *out, size_t out_sz)
 		n = cmd_stop(out, out_sz);
 	} else if (strcmp(line, "STATUS") == 0) {
 		n = cmd_status(out, out_sz);
+	} else if (strncmp(line, "HOLD", 4) == 0) {
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+		long ms = strtol(line + 4, NULL, 10);
+		if (ms < 100 || ms > 10000) { ms = 3500; }
+		gs_assist_inject_hold((uint32_t)ms);
+		n = snprintk(out, out_sz, "OK hold %ld", ms);
+#else
+		n = snprintk(out, out_sz, "ERR assist disabled");
+#endif
 	} else if (strcmp(line, "PRESS") == 0) {
 #if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
 		/* Family Assistance bench hook (spec §5.11): same entry point as the
