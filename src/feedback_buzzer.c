@@ -66,6 +66,22 @@ static bool s_inited;
 static bool s_powered;
 static bool s_present;    /* answered the ID query this power cycle */
 
+/* Hold-to-cancel sound (GOSTEADY_ASSIST_CANCEL_STYLE; bench: CANCELSTYLE <n>).
+ * Jace picked `steps` on the bench 2026-09-29 (spec D23). */
+enum cancel_style {
+	STYLE_STEADY,   /* v0.5: flat 1.5 kHz tone until release/cancel */
+	STYLE_GLIDE,    /* wind-down: one continuous slide 2.73 → 1.62 kHz, easing to vol 3 */
+	STYLE_STEPS,    /* staircase: six pips stepping down whole tones, 400 ms apart */
+	STYLE_CHIME,    /* three held notes descending a major arpeggio */
+	STYLE_FADE,     /* the countdown pip itself, slowing and getting quieter */
+	STYLE_COUNT
+};
+static const char *const style_name[STYLE_COUNT] = {
+	"steady", "glide", "steps", "chime", "fade",
+};
+BUILD_ASSERT(CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE < STYLE_COUNT);
+static int s_style = CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE;
+
 /* ---- low-level ---- */
 
 static int reg_write_u8(uint8_t reg, uint8_t val)
@@ -142,8 +158,8 @@ int gs_feedback_init(void)
 		return -ENODEV;
 	}
 	s_inited = true;
-	LOG_INF("qwiic buzzer bound: bus %s addr 0x%02x, VDD_EXP_BRD via P0.03 (off), vol %d, %d Hz",
-		buzzer.bus->name, buzzer.addr, VOL, F_RES);
+	LOG_INF("qwiic buzzer bound: bus %s addr 0x%02x, VDD_EXP_BRD via P0.03 (off), vol %d, %d Hz, hold-to-cancel %s",
+		buzzer.bus->name, buzzer.addr, VOL, F_RES, style_name[s_style]);
 	return 0;
 }
 
@@ -250,26 +266,12 @@ void gs_feedback_tick(enum gs_fb_phase phase)
 }
 
 /* ---- hold-to-cancel ----
- * Candidate sounds for "keep holding — cancelling" (bench-switchable with
- * CANCELSTYLE <n>, default GOSTEADY_ASSIST_CANCEL_STYLE). All but `steady`
- * describe progress — the listener can hear how close the cancel is — and
- * stay out of the deep register that failed/fault use; they end on the same
- * soft "stood down" ding-dong. `steady` is the v0.5 sound, kept for A/B.
- * Volume steps are large on this board (4 direct, 3 via 100 Ω, 2 via 330 Ω,
- * 1 via 2.2 kΩ ≈ −35 dB), so fades stop at 2–3. */
-enum cancel_style {
-	STYLE_STEADY,   /* v0.5: flat 1.5 kHz tone until release/cancel */
-	STYLE_GLIDE,    /* wind-down: one continuous slide 2.73 → 1.62 kHz, easing to vol 3 */
-	STYLE_STEPS,    /* staircase: six pips stepping down whole tones, 400 ms apart */
-	STYLE_CHIME,    /* three held notes descending a major arpeggio */
-	STYLE_FADE,     /* the countdown pip itself, slowing and getting quieter */
-	STYLE_COUNT
-};
-static const char *const style_name[STYLE_COUNT] = {
-	"steady", "glide", "steps", "chime", "fade",
-};
-BUILD_ASSERT(CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE < STYLE_COUNT);
-
+ * Candidate sounds for "keep holding — cancelling" (style list at the top).
+ * All but `steady` describe progress — the listener can hear how close the
+ * cancel is — and stay out of the deep register that failed/fault use; they
+ * end on the same soft "stood down" ding-dong. `steady` is the v0.5 sound,
+ * kept for A/B. Volume steps are large on this board (4 direct, 3 via 100 Ω,
+ * 2 via 330 Ω, 1 via 2.2 kΩ ≈ −35 dB), so fades stop at 2–3. */
 #define F_GLIDE_END  1620   /* a major sixth under resonance */
 #define STEP_MS      400
 #define STEP_NOTE_MS 150
@@ -286,7 +288,6 @@ static const struct { uint16_t at_ms; uint8_t drop; } fade_pips[] = {
 	{ 0, 0 }, { 450, 0 }, { 950, 1 }, { 1500, 2 }, { 2100, 2 },
 };
 
-static int s_style = CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE;
 static struct {
 	bool     on;
 	int      step;   /* last discrete note played, -1 = none yet */

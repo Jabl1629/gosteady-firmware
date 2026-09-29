@@ -284,7 +284,8 @@ larger changes than the doc.
   holds a colour on LED1 + LED3 (pauses the bench purple blink) so it can be judged
   through the cap; `CANCELSTYLE <0-4>` switches the hold-to-cancel sound at runtime
   (0 steady v0.5, 1 glide, 2 steps, 3 chime, 4 fade; default
-  `CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE=1`).
+  `CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE=2` — **steps**, Jace's pick, spec D23; the boot
+  log names it: `hold-to-cancel steps`). A bare `CANCELSTYLE` is rejected.
 - **Measured:** all five sounds end-to-end (hold feedback 0.6 s into the hold, cancel
   at 3.00–3.01 s, end cue, rail off); regression: 2 s hold released → sent +20.007 s,
   confirmed +22.007 s; hold from 19.0 s → deferred at T20 → cancelled +22.03 s. Hold

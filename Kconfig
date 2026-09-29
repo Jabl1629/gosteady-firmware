@@ -435,14 +435,15 @@ config GOSTEADY_ASSIST_CANCEL_STYLE
 	int "Hold-to-cancel sound (0 steady, 1 glide, 2 steps, 3 chime, 4 fade)"
 	depends on GOSTEADY_ASSIST_FEEDBACK_BUZZER
 	range 0 4
-	default 1
+	default 2
 	help
 	  What the buzzer plays while the button is held toward a cancel
 	  (feedback_buzzer.c). 0 = the v0.5 steady 1.5 kHz tone + deep falling
-	  two-note; 1 = wind-down glide; 2 = descending pip staircase;
-	  3 = descending three-note chime; 4 = the countdown pip slowing and
-	  fading. 1–4 end on the same "stood down" ding-dong. Switchable at
-	  runtime on the bench with the uart1 command CANCELSTYLE <n>.
+	  two-note; 1 = wind-down glide; 2 = descending pip staircase (chosen
+	  on the bench 2026-09-29, spec D23); 3 = descending three-note chime;
+	  4 = the countdown pip slowing and fading. 1–4 end on the same
+	  "stood down" ding-dong. Switchable at runtime on the bench with the
+	  uart1 command CANCELSTYLE <n>.
 
 config GOSTEADY_ASSIST_AUDIO
 	bool

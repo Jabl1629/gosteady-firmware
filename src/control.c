@@ -275,7 +275,10 @@ int gosteady_control_execute(const char *line, char *out, size_t out_sz)
 		    snprintk(out, out_sz, "ERR colour (red|green|blue|magenta|cyan|yellow|white|off)");
 	} else if (strncmp(line, "CANCELSTYLE", 11) == 0) {
 #if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
-		const char *name = gs_feedback_set_cancel_style((int)strtol(line + 11, NULL, 10));
+		char *end;
+		long st = strtol(line + 11, &end, 10);
+		/* A bare "CANCELSTYLE" must not silently select style 0. */
+		const char *name = (end != line + 11) ? gs_feedback_set_cancel_style((int)st) : NULL;
 		n = name ? snprintk(out, out_sz, "OK cancel style %s", name) :
 		    snprintk(out, out_sz, "ERR style (0 steady|1 glide|2 steps|3 chime|4 fade)");
 #else
