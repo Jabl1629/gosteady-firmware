@@ -33,6 +33,14 @@ int  gs_light_init(void);
 /* LED1 + LED3 to this colour (borrows LED3 on first use). */
 void gs_light_set(bool r, bool g, bool b);
 
+/* Beat mode (assistance countdown): the light shows this colour only while
+ * a beep sounds and is dark in between — feedback_buzzer.c brackets every
+ * note with gs_light_flash(true/false), a no-op outside beat mode. Full
+ * brightness is the hardware's: LED1 ~13 mA red (100 Ω), LED3 5 mA (fixed
+ * PMIC sink). gs_light_set()/release() end it. */
+void gs_light_beat(bool r, bool g, bool b);
+void gs_light_flash(bool on);
+
 /* Everything dark; LED3 back under charger control. Idempotent. */
 void gs_light_release(void);
 

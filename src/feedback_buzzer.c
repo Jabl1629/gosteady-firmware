@@ -33,6 +33,7 @@
 #include <math.h>
 
 #include "feedback.h"
+#include "light.h"
 
 LOG_MODULE_REGISTER(gs_buzzer, LOG_LEVEL_INF);
 
@@ -133,13 +134,17 @@ static int note_off(void)
 }
 
 /* Blocking note: sound for `ms`, then a `gap_ms` rest. The buzzer times the
- * note itself; we just wait so the next note doesn't cut it. */
+ * note itself; we just wait so the next note doesn't cut it. In beat mode
+ * (light.c) the status light is lit for exactly the note. */
 static void note(uint16_t freq_hz, uint16_t ms, uint16_t gap_ms)
 {
 	if (s_present) {
 		(void)note_on(freq_hz, ms, VOL);
 	}
-	k_msleep(ms + gap_ms);
+	gs_light_flash(true);
+	k_msleep(ms);
+	gs_light_flash(false);
+	k_msleep(gap_ms);
 }
 
 /* ---- public API ---- */
@@ -293,7 +298,17 @@ static struct {
 	int      step;   /* last discrete note played, -1 = none yet */
 	uint16_t freq;   /* glide: last pitch / volume written */
 	uint8_t  vol;
+	int64_t  light_off_at;   /* beat mode: uptime the current note's flash ends, 0 = none */
 } s_hold;
+
+/* Beat mode: light the status light for a hold note that the buzzer times on
+ * its own; gs_feedback_hold() puts it out on the first poll (20 ms apart)
+ * after the note ends. ms == 0: continuous, out at gs_feedback_hold_end(). */
+static void hold_flash(uint16_t ms)
+{
+	gs_light_flash(true);
+	s_hold.light_off_at = ms ? k_uptime_get() + ms : 0;
+}
 
 static uint8_t vol_drop(int by)
 {
@@ -323,7 +338,12 @@ void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
 		s_hold.step = -1;
 		s_hold.freq = 0;
 		s_hold.vol = 0;
+		s_hold.light_off_at = 0;
 		LOG_INF("hold feedback: %s", style_name[s_style]);
+	}
+	if (s_hold.light_off_at && k_uptime_get() >= s_hold.light_off_at) {
+		gs_light_flash(false);
+		s_hold.light_off_at = 0;
 	}
 	if (!s_present) {
 		return;
@@ -339,6 +359,9 @@ void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
 		uint16_t f = (uint16_t)(F_RES * powf((float)F_GLIDE_END / F_RES, p));
 		uint8_t v = vol_drop(p < 0.6f ? 0 : 1);
 		if (f != s_hold.freq || v != s_hold.vol) {
+			if (s_hold.freq == 0) {
+				hold_flash(0);
+			}
 			(void)note_on(f, 0, v);
 			s_hold.freq = f;
 			s_hold.vol = v;
@@ -349,6 +372,7 @@ void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
 		k = (int)(ms / STEP_MS);
 		if (k != s_hold.step && k < (int)ARRAY_SIZE(steps_permille)) {
 			(void)note_on(ratio(steps_permille[k]), STEP_NOTE_MS, VOL);
+			hold_flash(STEP_NOTE_MS);
 			s_hold.step = k;
 		}
 		break;
@@ -356,6 +380,7 @@ void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
 		k = (int)(ms / CHIME_MS);
 		if (k != s_hold.step && k < (int)ARRAY_SIZE(chime_permille)) {
 			(void)note_on(ratio(chime_permille[k]), CHIME_NOTE_MS, VOL);
+			hold_flash(CHIME_NOTE_MS);
 			s_hold.step = k;
 		}
 		break;
@@ -368,6 +393,7 @@ void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
 		}
 		if (k != s_hold.step && k >= 0) {
 			(void)note_on(F_RES, 100, vol_drop(fade_pips[k].drop));
+			hold_flash(100);
 			s_hold.step = k;
 		}
 		break;
@@ -375,6 +401,7 @@ void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
 	default:
 		if (s_hold.step < 0) {
 			(void)note_on(F_LOW, 0, VOL);   /* continuous until off */
+			hold_flash(0);
 			s_hold.step = 0;
 		}
 		break;
@@ -386,6 +413,10 @@ void gs_feedback_hold_end(void)
 	if (s_hold.on && s_present) {
 		(void)note_off();
 	}
+	if (s_hold.on) {
+		gs_light_flash(false);
+	}
+	s_hold.light_off_at = 0;
 	s_hold.on = false;
 }
 

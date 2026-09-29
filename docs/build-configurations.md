@@ -279,7 +279,10 @@ larger changes than the doc.
   handed back on release. This board runs the sinks as error / charging / host
   (read at boot: modes 0/1/2), so the charge LED normally shows green while charging
   and red on a charger error. Init also recovers a charge LED that a reset caught
-  borrowed. LED2 is wired to the nRF5340 and is not driven.
+  borrowed. LED2 is wired to the nRF5340 and is not driven. **Beat mode** (spec D24):
+  once the buzzer answers, the assistance red is dark between beeps and flashes on
+  LED1 + LED3 for exactly each note (`gs_light_flash()` brackets every note in
+  `feedback_buzzer.c`); solid red if the buzzer is absent.
 - **More control-channel hooks:** `LED <red|green|blue|magenta|cyan|yellow|white|off>`
   holds a colour on LED1 + LED3 (pauses the bench purple blink) so it can be judged
   through the cap; `CANCELSTYLE <0-4>` switches the hold-to-cancel sound at runtime

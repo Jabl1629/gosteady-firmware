@@ -6,7 +6,8 @@
  * Timeline (t = 0 at the debounced press):
  *   0.0   status light red (LED1 + the borrowed charge LED, light.c), power
  *         the feedback device, "heard you" chirp, start the cloud connect
- *         (FA-2), 1 Hz beep cadence.
+ *         (FA-2), 1 Hz beep cadence. Once the buzzer answers, the red light
+ *         blinks with every beep instead of staying solid.
  *   10.0  phase marker beep; cadence becomes a double beep per second.
  *   17.0  final phase: rapid beeps.
  *   0–20  press-and-HOLD the button ≥ CANCEL_HOLD_MS (3 s) → cancelled tone,
@@ -202,6 +203,16 @@ static bool debounced_press(void)
 	return button_down();
 }
 
+/* Red in time with the buzzer: with a working buzzer the status light blinks
+ * with every beep (light.c beat mode, bracketed by feedback_buzzer.c's notes);
+ * otherwise it stays solid red so an LED-only incident is still obvious. */
+static void light_red(int fb)
+{
+	if (fb == 0 && IS_ENABLED(CONFIG_GOSTEADY_ASSIST_FEEDBACK_BUZZER)) {
+		gs_light_beat(1, 0, 0);
+	}
+}
+
 static void finish(void)
 {
 	gs_feedback_end();
@@ -320,7 +331,7 @@ static void assist_entry(void *a, void *b, void *c)
 
 		if (!s_armed) {
 			LOG_WRN("assist: press while NOT armed — no request");
-			(void)gs_feedback_begin();
+			light_red(gs_feedback_begin());
 			gs_feedback_not_setup();
 			finish();
 			continue;
@@ -333,6 +344,7 @@ static void assist_entry(void *a, void *b, void *c)
 		 * starts here too (FA-2). */
 		int fb = gs_feedback_begin();
 		LOG_INF("assist: t+%lld ms feedback %s", k_uptime_get() - t0, fb == 0 ? "ready" : "ABSENT (LED only)");
+		light_red(fb);
 		gs_feedback_countdown_start();
 
 		if (run_countdown(t0)) {

@@ -86,6 +86,40 @@ static void hand_back(void)
 static K_MUTEX_DEFINE(s_lock);
 static atomic_t s_bench;
 
+/* Beat mode: dark except between gs_light_flash(true) and (false) — the
+ * buzzer backend calls those around every note, so the light blinks with the
+ * beeps. gs_light_set()/release() end it. */
+static bool    s_beat;
+static uint8_t s_beat_rgb;
+
+static uint8_t rgb_bits(bool r, bool g, bool b)
+{
+	return (r ? BIT(0) : 0) | (g ? BIT(1) : 0) | (b ? BIT(2) : 0);
+}
+
+/* LED1 + LED3 to an RGB bit set (bit 0 R, 1 G, 2 B). Caller holds s_lock. */
+static void show(uint8_t rgb)
+{
+	(void)gpio_pin_set_dt(&led_red, rgb & BIT(0));
+	(void)gpio_pin_set_dt(&led_green, rgb & BIT(1));
+	(void)gpio_pin_set_dt(&led_blue, rgb & BIT(2));
+#if defined(HAVE_CHARGE_LED)
+	/* Dark keeps the LED borrowed (a pulsing flow shouldn't flash the
+	 * charger's colour between pulses); release hands it back. */
+	if (s_ready && rgb && !s_borrowed) {
+		borrow();
+	}
+	if (s_borrowed) {
+		for (uint8_t n = 0; n < N_CH; n++) {
+			if ((rgb ^ s_lit) & BIT(n)) {
+				ch_write((rgb & BIT(n)) ? LED_SET(n) : LED_CLR(n));
+			}
+		}
+		s_lit = rgb;
+	}
+#endif
+}
+
 int gs_light_init(void)
 {
 #if defined(HAVE_CHARGE_LED)
@@ -124,32 +158,33 @@ int gs_light_init(void)
 void gs_light_set(bool r, bool g, bool b)
 {
 	k_mutex_lock(&s_lock, K_FOREVER);
-	(void)gpio_pin_set_dt(&led_red, r);
-	(void)gpio_pin_set_dt(&led_green, g);
-	(void)gpio_pin_set_dt(&led_blue, b);
-#if defined(HAVE_CHARGE_LED)
-	uint8_t want = (r ? BIT(0) : 0) | (g ? BIT(1) : 0) | (b ? BIT(2) : 0);
+	s_beat = false;
+	show(rgb_bits(r, g, b));
+	k_mutex_unlock(&s_lock);
+}
 
-	/* Dark keeps the LED borrowed (a pulsing flow shouldn't flash the
-	 * charger's colour between pulses); release hands it back. */
-	if (s_ready && want && !s_borrowed) {
-		borrow();
+void gs_light_beat(bool r, bool g, bool b)
+{
+	k_mutex_lock(&s_lock, K_FOREVER);
+	s_beat = true;
+	s_beat_rgb = rgb_bits(r, g, b);
+	show(0);   /* dark until the next note */
+	k_mutex_unlock(&s_lock);
+}
+
+void gs_light_flash(bool on)
+{
+	k_mutex_lock(&s_lock, K_FOREVER);
+	if (s_beat) {
+		show(on ? s_beat_rgb : 0);
 	}
-	if (s_borrowed) {
-		for (uint8_t n = 0; n < N_CH; n++) {
-			if ((want ^ s_lit) & BIT(n)) {
-				ch_write((want & BIT(n)) ? LED_SET(n) : LED_CLR(n));
-			}
-		}
-		s_lit = want;
-	}
-#endif
 	k_mutex_unlock(&s_lock);
 }
 
 void gs_light_release(void)
 {
 	k_mutex_lock(&s_lock, K_FOREVER);
+	s_beat = false;
 	(void)gpio_pin_set_dt(&led_red, 0);
 	(void)gpio_pin_set_dt(&led_green, 0);
 	(void)gpio_pin_set_dt(&led_blue, 0);
