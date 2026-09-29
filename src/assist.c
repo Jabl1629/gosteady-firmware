@@ -4,13 +4,15 @@
  * (v0.4: buzzer feedback + hold-to-cancel).
  *
  * Timeline (t = 0 at the debounced press):
- *   0.0   red LED on, power the feedback device, "heard you" chirp, start the
- *         cloud connect (FA-2), 1 Hz beep cadence.
+ *   0.0   status light red (LED1 + the borrowed charge LED, light.c), power
+ *         the feedback device, "heard you" chirp, start the cloud connect
+ *         (FA-2), 1 Hz beep cadence.
  *   10.0  phase marker beep; cadence becomes a double beep per second.
  *   17.0  final phase: rapid beeps.
  *   0–20  press-and-HOLD the button ≥ CANCEL_HOLD_MS (3 s) → cancelled tone,
- *         nothing is sent. A steady low tone plays after HOLD_WARN_MS of
- *         holding so the user knows the hold is registering. Holding the
+ *         nothing is sent. From HOLD_WARN_MS of holding the buzzer plays
+ *         hold progress (GOSTEADY_ASSIST_CANCEL_STYLE) so the user knows the
+ *         hold is registering and how close the cancel is. Holding the
  *         *initial* press for 3 s cancels too (sustained accidental pressure
  *         never sends).
  *   20.0  publish the request; wait ≤ ACK_WAIT_S for `assist_ack`; retry.
@@ -32,6 +34,7 @@
 
 #include "assist.h"
 #include "feedback.h"
+#include "light.h"
 
 LOG_MODULE_REGISTER(gs_assist, LOG_LEVEL_INF);
 
@@ -44,22 +47,14 @@ LOG_MODULE_REGISTER(gs_assist, LOG_LEVEL_INF);
 #define MAX_ATTEMPTS     3
 #define DEBOUNCE_MS      50
 #define POLL_MS          50                        /* button/hold sampling */
+#define POLL_HOLD_MS     20                        /* while hold feedback plays (glide steps) */
 #define TICK_EARLY_MS    1000
 #define TICK_LATE_MS     1000
 #define TICK_FINAL_MS    350
 
-/* ---- button + LEDs (own specs; main.c configures the pins at boot) ---- */
+/* ---- button (own spec; main.c configures the pin at boot). The status
+ * light is light.c. ---- */
 static const struct gpio_dt_spec button    = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
-static const struct gpio_dt_spec led_red   = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
-static const struct gpio_dt_spec led_blue  = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
-
-static void led(bool r, bool g, bool b)
-{
-	(void)gpio_pin_set_dt(&led_red, r);
-	(void)gpio_pin_set_dt(&led_green, g);
-	(void)gpio_pin_set_dt(&led_blue, b);
-}
 
 #if !defined(CONFIG_GOSTEADY_FIELD_MODE)
 static int64_t s_fake_down_until;   /* bench HOLD hook: pretend the button is down until this uptime */
@@ -210,7 +205,7 @@ static bool debounced_press(void)
 static void finish(void)
 {
 	gs_feedback_end();
-	led(0, 0, 0);
+	gs_light_release();
 	k_sem_reset(&press_sem);
 	k_sem_reset(&ack_sem);
 	atomic_set(&s_active, 0);
@@ -222,7 +217,7 @@ static bool run_countdown(int64_t t0)
 {
 	int64_t held_since = k_uptime_get();   /* the initial press counts */
 	bool holding = button_down();
-	bool hold_tone = false;
+	bool hold_fb = false;                  /* hold progress is playing */
 	bool mid_done = false;
 	int64_t next_tick = TICK_EARLY_MS;     /* first cadence beep at t+1 s */
 
@@ -241,9 +236,9 @@ static bool run_countdown(int64_t t0)
 			holding = false;
 			LOG_INF("assist: released after %lld ms hold at t+%lld ms",
 				k_uptime_get() - held_since, now);
-			if (hold_tone) {
-				gs_feedback_hold_tone(false);
-				hold_tone = false;
+			if (hold_fb) {
+				gs_feedback_hold_end();
+				hold_fb = false;
 			}
 		}
 
@@ -263,23 +258,24 @@ static bool run_countdown(int64_t t0)
 		if (holding) {
 			int64_t held = k_uptime_get() - held_since;
 			if (held >= CANCEL_HOLD_MS) {
-				if (hold_tone) {
-					gs_feedback_hold_tone(false);
+				if (hold_fb) {
+					gs_feedback_hold_end();
 				}
 				LOG_INF("assist: CANCELLED by %lld ms hold at t+%lld ms", held, now);
 				return true;
 			}
-			if (held >= HOLD_WARN_MS && !hold_tone) {
-				gs_feedback_hold_tone(true);
-				hold_tone = true;
+			if (held >= HOLD_WARN_MS) {
+				gs_feedback_hold((uint32_t)(held - HOLD_WARN_MS),
+						 CANCEL_HOLD_MS - HOLD_WARN_MS);
+				hold_fb = true;
 			}
 		}
 
-		/* --- cadence (suppressed while the hold tone sounds) --- */
+		/* --- cadence (suppressed while hold progress plays) --- */
 		if (!mid_done && now >= MIDPROMPT_MS) {
 			mid_done = true;
 			LOG_INF("assist: t+%lld ms mid-countdown", now);
-			if (!hold_tone) {
+			if (!hold_fb) {
 				gs_feedback_countdown_mid();
 			}
 			next_tick = now + TICK_LATE_MS;
@@ -287,13 +283,13 @@ static bool run_countdown(int64_t t0)
 		if (now >= next_tick) {
 			enum gs_fb_phase ph = (now >= COUNTDOWN_MS - FINAL_PHASE_MS) ? GS_FB_PHASE_FINAL :
 					      mid_done ? GS_FB_PHASE_LATE : GS_FB_PHASE_EARLY;
-			if (!hold_tone) {
+			if (!hold_fb) {
 				gs_feedback_tick(ph);
 			}
 			next_tick += (ph == GS_FB_PHASE_FINAL) ? TICK_FINAL_MS :
 				     (ph == GS_FB_PHASE_LATE) ? TICK_LATE_MS : TICK_EARLY_MS;
 		}
-		k_msleep(POLL_MS);
+		k_msleep(hold_fb ? POLL_HOLD_MS : POLL_MS);
 	}
 }
 
@@ -320,7 +316,7 @@ static void assist_entry(void *a, void *b, void *c)
 		int64_t t0 = k_uptime_get();
 		atomic_set(&s_active, 1);
 		k_sem_reset(&press_sem);
-		led(1, 0, 0);
+		gs_light_set(1, 0, 0);
 
 		if (!s_armed) {
 			LOG_WRN("assist: press while NOT armed — no request");
@@ -346,7 +342,7 @@ static void assist_entry(void *a, void *b, void *c)
 		}
 
 		/* SENDING / AWAIT_ACK */
-		led(1, 0, 1);
+		gs_light_set(1, 0, 1);
 		k_sem_reset(&ack_sem);
 		bool acked = false;
 		for (int attempt = 1; attempt <= MAX_ATTEMPTS && !acked; attempt++) {
@@ -369,7 +365,7 @@ static void assist_entry(void *a, void *b, void *c)
 		if (acked && s_ack.status == 0) {
 			LOG_INF("assist: CONFIRMED (%s) at t+%lld ms", s_ack.test_mode ? "test" : "live",
 				k_uptime_get() - t0);
-			led(0, 1, 0);
+			gs_light_set(0, 1, 0);
 			gs_feedback_confirmed(s_ack.test_mode);
 		} else if (acked) {
 			LOG_WRN("assist: cloud says not_ready — disarming");

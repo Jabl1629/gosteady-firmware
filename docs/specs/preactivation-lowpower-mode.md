@@ -46,6 +46,10 @@ callback is needed — they reconfigure on the next iteration.
 
 LED contract for the field/pilot build: **blue = pre-activation "pick me up to
 set up"; green = recording; nothing at rest.** (Idle purple blink stays off.)
+Since 2026-09-29 the blue wake-window pulse and the green activation confirm
+light **LED1 and the nPM1300 charge LED (LED3)** together (`src/light.c`) so they
+carry through the bottom cap; the charge LED is handed back to the charger when
+the window ends. Recording green stays LED1-only.
 
 ---
 

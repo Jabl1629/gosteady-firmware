@@ -15,13 +15,14 @@
  * P0.03) — spec L8.
  *
  * All calls run on the assist thread. Pattern calls may block for the length
- * of the pattern (≤ ~1.5 s); ticks and the hold tone return immediately.
+ * of the pattern (≤ ~1.5 s); ticks and hold progress return immediately.
  */
 
 #ifndef GOSTEADY_FEEDBACK_H_
 #define GOSTEADY_FEEDBACK_H_
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -53,9 +54,18 @@ void gs_feedback_countdown_start(void);          /* t = 0 (press accepted) */
 void gs_feedback_countdown_mid(void);            /* t = MIDPROMPT_S */
 void gs_feedback_tick(enum gs_fb_phase phase);   /* once per cadence slot */
 
-/* Hold-to-cancel progress: steady low tone while the button is held past the
- * warn threshold; off on release. */
-void gs_feedback_hold_tone(bool on);
+/* Hold-to-cancel progress. assist.c calls gs_feedback_hold() on every poll
+ * once the button has been held past its warn threshold: `ms` since the
+ * feedback began, `span_ms` from then until the hold cancels. The backend
+ * decides what progress sounds like (buzzer: GOSTEADY_ASSIST_CANCEL_STYLE).
+ * gs_feedback_hold_end() silences it — on release, or just before
+ * gs_feedback_cancelled(). */
+void gs_feedback_hold(uint32_t ms, uint32_t span_ms);
+void gs_feedback_hold_end(void);
+
+/* Bench (control channel "CANCELSTYLE <n>"): switch the hold-to-cancel sound
+ * at runtime. Returns the style's name, or NULL if unknown/unsupported. */
+const char *gs_feedback_set_cancel_style(int style);
 
 /* Outcomes (blocking patterns). */
 void gs_feedback_cancelled(void);
@@ -75,7 +85,9 @@ static inline void gs_feedback_end(void) {}
 static inline void gs_feedback_countdown_start(void) {}
 static inline void gs_feedback_countdown_mid(void) {}
 static inline void gs_feedback_tick(enum gs_fb_phase phase) { (void)phase; }
-static inline void gs_feedback_hold_tone(bool on) { (void)on; }
+static inline void gs_feedback_hold(uint32_t ms, uint32_t span_ms) { (void)ms; (void)span_ms; }
+static inline void gs_feedback_hold_end(void) {}
+static inline const char *gs_feedback_set_cancel_style(int style) { (void)style; return NULL; }
 static inline void gs_feedback_cancelled(void) {}
 static inline void gs_feedback_confirmed(bool test_mode) { (void)test_mode; }
 static inline void gs_feedback_failed(void) {}

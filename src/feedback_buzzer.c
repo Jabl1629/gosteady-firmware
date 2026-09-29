@@ -30,6 +30,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/logging/log.h>
+#include <math.h>
 
 #include "feedback.h"
 
@@ -216,7 +217,7 @@ void gs_feedback_end(void)
  * Design intent (older-adult legibility): one cadence per phase, always at
  * the loud resonant pitch; outcomes use pitch *movement* (rising = good,
  * falling = cancelled, deep + long = trouble) so they are distinguishable
- * without counting beeps. Spec §5.3 (v0.4). */
+ * without counting beeps. Spec §5.3. */
 
 void gs_feedback_countdown_start(void)
 {
@@ -248,23 +249,159 @@ void gs_feedback_tick(enum gs_fb_phase phase)
 	}
 }
 
-void gs_feedback_hold_tone(bool on)
+/* ---- hold-to-cancel ----
+ * Candidate sounds for "keep holding — cancelling" (bench-switchable with
+ * CANCELSTYLE <n>, default GOSTEADY_ASSIST_CANCEL_STYLE). All but `steady`
+ * describe progress — the listener can hear how close the cancel is — and
+ * stay out of the deep register that failed/fault use; they end on the same
+ * soft "stood down" ding-dong. `steady` is the v0.5 sound, kept for A/B.
+ * Volume steps are large on this board (4 direct, 3 via 100 Ω, 2 via 330 Ω,
+ * 1 via 2.2 kΩ ≈ −35 dB), so fades stop at 2–3. */
+enum cancel_style {
+	STYLE_STEADY,   /* v0.5: flat 1.5 kHz tone until release/cancel */
+	STYLE_GLIDE,    /* wind-down: one continuous slide 2.73 → 1.62 kHz, easing to vol 3 */
+	STYLE_STEPS,    /* staircase: six pips stepping down whole tones, 400 ms apart */
+	STYLE_CHIME,    /* three held notes descending a major arpeggio */
+	STYLE_FADE,     /* the countdown pip itself, slowing and getting quieter */
+	STYLE_COUNT
+};
+static const char *const style_name[STYLE_COUNT] = {
+	"steady", "glide", "steps", "chime", "fade",
+};
+BUILD_ASSERT(CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE < STYLE_COUNT);
+
+#define F_GLIDE_END  1620   /* a major sixth under resonance */
+#define STEP_MS      400
+#define STEP_NOTE_MS 150
+#define CHIME_MS     800
+#define CHIME_NOTE_MS 700
+#define F_DONG       2167   /* a major third under resonance */
+
+/* Pitch ratios (‰ of F_RES): whole tones down, and a descending major arpeggio. */
+static const uint16_t steps_permille[] = { 1000, 891, 794, 707, 630, 561 };
+static const uint16_t chime_permille[] = { 1000, 794, 667 };
+/* Fade: when each pip starts (ms into the hold feedback) and how many volume
+ * steps it drops. */
+static const struct { uint16_t at_ms; uint8_t drop; } fade_pips[] = {
+	{ 0, 0 }, { 450, 0 }, { 950, 1 }, { 1500, 2 }, { 2100, 2 },
+};
+
+static int s_style = CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE;
+static struct {
+	bool     on;
+	int      step;   /* last discrete note played, -1 = none yet */
+	uint16_t freq;   /* glide: last pitch / volume written */
+	uint8_t  vol;
+} s_hold;
+
+static uint8_t vol_drop(int by)
 {
+	int v = VOL - by;
+	return (uint8_t)(v < 1 ? 1 : v);
+}
+
+static uint16_t ratio(uint16_t permille)
+{
+	return (uint16_t)((uint32_t)F_RES * permille / 1000U);
+}
+
+const char *gs_feedback_set_cancel_style(int style)
+{
+	if (style < 0 || style >= STYLE_COUNT) {
+		return NULL;
+	}
+	s_style = style;
+	LOG_INF("hold-to-cancel sound: %d (%s)", style, style_name[style]);
+	return style_name[style];
+}
+
+void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
+{
+	if (!s_hold.on) {
+		s_hold.on = true;
+		s_hold.step = -1;
+		s_hold.freq = 0;
+		s_hold.vol = 0;
+		LOG_INF("hold feedback: %s", style_name[s_style]);
+	}
 	if (!s_present) {
 		return;
 	}
-	if (on) {
-		(void)note_on(F_LOW, 0, VOL);   /* continuous until off */
-	} else {
+
+	int k;
+
+	switch (s_style) {
+	case STYLE_GLIDE: {
+		/* Exponential in frequency so the slide sounds even in pitch; the
+		 * element's resonance falls away too, which carries the fade. */
+		float p = MIN((float)ms / (float)span_ms, 1.0f);
+		uint16_t f = (uint16_t)(F_RES * powf((float)F_GLIDE_END / F_RES, p));
+		uint8_t v = vol_drop(p < 0.6f ? 0 : 1);
+		if (f != s_hold.freq || v != s_hold.vol) {
+			(void)note_on(f, 0, v);
+			s_hold.freq = f;
+			s_hold.vol = v;
+		}
+		break;
+	}
+	case STYLE_STEPS:
+		k = (int)(ms / STEP_MS);
+		if (k != s_hold.step && k < (int)ARRAY_SIZE(steps_permille)) {
+			(void)note_on(ratio(steps_permille[k]), STEP_NOTE_MS, VOL);
+			s_hold.step = k;
+		}
+		break;
+	case STYLE_CHIME:
+		k = (int)(ms / CHIME_MS);
+		if (k != s_hold.step && k < (int)ARRAY_SIZE(chime_permille)) {
+			(void)note_on(ratio(chime_permille[k]), CHIME_NOTE_MS, VOL);
+			s_hold.step = k;
+		}
+		break;
+	case STYLE_FADE:
+		k = -1;
+		for (int i = 0; i < (int)ARRAY_SIZE(fade_pips); i++) {
+			if (ms >= fade_pips[i].at_ms) {
+				k = i;
+			}
+		}
+		if (k != s_hold.step && k >= 0) {
+			(void)note_on(F_RES, 100, vol_drop(fade_pips[k].drop));
+			s_hold.step = k;
+		}
+		break;
+	case STYLE_STEADY:
+	default:
+		if (s_hold.step < 0) {
+			(void)note_on(F_LOW, 0, VOL);   /* continuous until off */
+			s_hold.step = 0;
+		}
+		break;
+	}
+}
+
+void gs_feedback_hold_end(void)
+{
+	if (s_hold.on && s_present) {
 		(void)note_off();
 	}
+	s_hold.on = false;
 }
 
 void gs_feedback_cancelled(void)
 {
-	/* Falling two-note. */
-	note(F_MID, 180, 40);
-	note(F_DEEP, 450, 0);
+	if (s_style == STYLE_STEADY) {
+		/* v0.5: falling two-note into the deep register. */
+		note(F_MID, 180, 40);
+		note(F_DEEP, 450, 0);
+		return;
+	}
+	/* "Stood down": a beat of silence, then a ding-dong a major third apart
+	 * in the element's clean band — neutral, unlike the deep failed/fault
+	 * patterns. */
+	k_msleep(120);
+	note(F_RES, 110, 40);
+	note(F_DONG, 300, 0);
 }
 
 void gs_feedback_confirmed(bool test_mode)

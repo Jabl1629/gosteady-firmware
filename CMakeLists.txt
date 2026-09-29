@@ -8,6 +8,7 @@ target_sources(app PRIVATE
   src/session.c
   src/control.c
   src/cellular.c
+  src/light.c
   src/algo/gs_filters.c
   src/algo/gs_motion_gate.c
   src/algo/gs_step_detector.c

@@ -17,8 +17,10 @@
 
 #include "control.h"
 #include "session.h"
+#include "light.h"    /* bench hook: LED <colour> */
 #if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
 #include "assist.h"   /* bench hook: PRESS injects an assistance-button press */
+#include "feedback.h" /* bench hook: CANCELSTYLE <n> */
 #endif
 
 #include <zephyr/kernel.h>
@@ -245,7 +247,9 @@ bool gosteady_control_recognises(const char *line)
 	       strncmp(line, "STOP",  4) == 0 ||
 	       strncmp(line, "STATUS", 6) == 0 ||
 	       strcmp(line, "PRESS") == 0 ||
-	       strncmp(line, "HOLD", 4) == 0;
+	       strncmp(line, "HOLD", 4) == 0 ||
+	       strncmp(line, "CANCELSTYLE", 11) == 0 ||
+	       strncmp(line, "LED ", 4) == 0;
 }
 
 int gosteady_control_execute(const char *line, char *out, size_t out_sz)
@@ -262,6 +266,21 @@ int gosteady_control_execute(const char *line, char *out, size_t out_sz)
 		n = cmd_stop(out, out_sz);
 	} else if (strcmp(line, "STATUS") == 0) {
 		n = cmd_status(out, out_sz);
+	} else if (strncmp(line, "LED ", 4) == 0) {
+		/* Status-light bench hook: hold a colour on LED1 + the charge LED
+		 * to judge it through the cap; "LED off" hands the LED back. */
+		const char *c = line + 4;
+		while (*c == ' ') { c++; }
+		n = gs_light_bench(c) ? snprintk(out, out_sz, "OK led %s", c) :
+		    snprintk(out, out_sz, "ERR colour (red|green|blue|magenta|cyan|yellow|white|off)");
+	} else if (strncmp(line, "CANCELSTYLE", 11) == 0) {
+#if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
+		const char *name = gs_feedback_set_cancel_style((int)strtol(line + 11, NULL, 10));
+		n = name ? snprintk(out, out_sz, "OK cancel style %s", name) :
+		    snprintk(out, out_sz, "ERR style (0 steady|1 glide|2 steps|3 chime|4 fade)");
+#else
+		n = snprintk(out, out_sz, "ERR assist disabled");
+#endif
 	} else if (strncmp(line, "HOLD", 4) == 0) {
 #if defined(CONFIG_GOSTEADY_ASSIST_ENABLE)
 		long ms = strtol(line + 4, NULL, 10);

@@ -361,8 +361,9 @@ config GOSTEADY_ASSIST_CANCEL_HOLD_MS
 	help
 	  Holding the button this long at any point in the countdown — including
 	  never releasing the initial press — cancels the request (PRD V2.3
-	  amendment 2026-09-18). A steady low tone starts after ~0.6 s of holding
-	  so the user knows the hold is registering.
+	  amendment 2026-09-18). Hold progress (GOSTEADY_ASSIST_CANCEL_STYLE)
+	  starts after ~0.6 s of holding so the user knows the hold is
+	  registering.
 
 config GOSTEADY_ASSIST_ACK_WAIT_S
 	int "Seconds to wait for the cloud assist_ack per attempt"
@@ -429,6 +430,19 @@ config GOSTEADY_ASSIST_BUZZER_FREQ_HZ
 	default 2730
 	help
 	  2730 Hz is the magnetic element's resonant (loudest) frequency.
+
+config GOSTEADY_ASSIST_CANCEL_STYLE
+	int "Hold-to-cancel sound (0 steady, 1 glide, 2 steps, 3 chime, 4 fade)"
+	depends on GOSTEADY_ASSIST_FEEDBACK_BUZZER
+	range 0 4
+	default 1
+	help
+	  What the buzzer plays while the button is held toward a cancel
+	  (feedback_buzzer.c). 0 = the v0.5 steady 1.5 kHz tone + deep falling
+	  two-note; 1 = wind-down glide; 2 = descending pip staircase;
+	  3 = descending three-note chime; 4 = the countdown pip slowing and
+	  fading. 1–4 end on the same "stood down" ding-dong. Switchable at
+	  runtime on the bench with the uart1 command CANCELSTYLE <n>.
 
 config GOSTEADY_ASSIST_AUDIO
 	bool

@@ -58,11 +58,27 @@ void gs_feedback_tick(enum gs_fb_phase phase)
 	ARG_UNUSED(phase);   /* speech carries the countdown */
 }
 
-void gs_feedback_hold_tone(bool on)
+static bool s_hold;
+
+void gs_feedback_hold(uint32_t ms, uint32_t span_ms)
 {
-	if (on) {
+	ARG_UNUSED(ms);
+	ARG_UNUSED(span_ms);
+	if (!s_hold) {
+		s_hold = true;
 		(void)gs_audio_play(GS_PROMPT_TONE);
 	}
+}
+
+void gs_feedback_hold_end(void)
+{
+	s_hold = false;
+}
+
+const char *gs_feedback_set_cancel_style(int style)
+{
+	ARG_UNUSED(style);
+	return NULL;   /* the speaker has one prompt */
 }
 
 void gs_feedback_cancelled(void)

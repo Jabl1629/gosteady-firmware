@@ -28,6 +28,7 @@
 #include <stdlib.h>
 
 #include "session.h"
+#include "light.h"
 #include "dump.h"
 #include "cellular.h"
 #include "cloud.h"
@@ -586,10 +587,9 @@ static struct k_thread auto_start_thread;
 
 static void preact_green_confirm(void)
 {
-	(void)gpio_pin_set_dt(&led_blue,  0);
-	(void)gpio_pin_set_dt(&led_green, 1);
+	gs_light_set(0, 1, 0);   /* LED1 + charge LED (light.c) */
 	k_msleep(PREACT_GREEN_CONFIRM_MS);
-	(void)gpio_pin_set_dt(&led_green, 0);
+	gs_light_release();
 }
 
 /* Pre-activation motion wake window (docs/specs/preactivation-lowpower-mode.md
@@ -629,10 +629,11 @@ static void run_preact_wake_window(void)
 		/* Steady ~1 Hz blue pulse, INDEPENDENT of motion. (The cadence used
 		 * to ride on the motion-reset wait, so shaking shortcut the gap and
 		 * produced erratic extra blinks — the "2 quick blinks on motion" UX
-		 * bug.) Fixed 100 ms on / 900 ms off. */
-		(void)gpio_pin_set_dt(&led_blue, 1);
+		 * bug.) Fixed 100 ms on / 900 ms off, on LED1 + the charge LED
+		 * (light.c) so it carries through the cap. */
+		gs_light_set(0, 0, 1);
 		k_msleep(PREACT_PULSE_ON_MS);
-		(void)gpio_pin_set_dt(&led_blue, 0);
+		gs_light_set(0, 0, 0);
 		k_msleep(PREACT_PULSE_GAP_MS);
 		/* Reset the motionless timer if ANY motion happened during the pulse
 		 * (non-blocking — does not perturb the pulse cadence). motion_event_sem
@@ -643,7 +644,7 @@ static void run_preact_wake_window(void)
 	}
 
 	gosteady_cloud_preact_wake_end();   /* cloud thread disconnects */
-	(void)gpio_pin_set_dt(&led_blue, 0);
+	gs_light_release();                 /* charge LED back to the charger */
 
 	if (activated || gosteady_activation_is_activated()) {
 		LOG_INF("preact: ACTIVATED during wake window → green confirm → normal");
@@ -1041,6 +1042,9 @@ int main(void)
 	if ((ret = configure_led(&led_red,   "red"))   < 0) return ret;
 	if ((ret = configure_led(&led_green, "green")) < 0) return ret;
 	if ((ret = configure_led(&led_blue,  "blue"))  < 0) return ret;
+	/* Status light for the activation + assistance flows: LED1 plus the
+	 * nPM1300 charge LED. Non-fatal — LED1 alone still works. */
+	(void)gs_light_init();
 
 	if (!device_is_ready(bmi270))  { LOG_ERR("bmi270 device not ready");  return -ENODEV; }
 	if (!device_is_ready(adxl367)) { LOG_ERR("adxl367 device not ready"); return -ENODEV; }
@@ -1247,6 +1251,8 @@ int main(void)
 			/* The assist thread owns the RGB LED during an incident. */
 			bench_blink = bench_blink && !gs_assist_is_active();
 #endif
+			/* ...and a bench "LED <colour>" hold owns it too. */
+			bench_blink = bench_blink && !gs_light_bench_active();
 			if (bench_blink) {
 				/* Bench: purple blink (red+blue toggle),
 				 * 1 Hz heartbeat log + motion-counter

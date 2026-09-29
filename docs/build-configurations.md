@@ -270,3 +270,22 @@ larger changes than the doc.
   +3.31 s; 2 s hold released → countdown continues; **hold started at 18.6 s: send
   deferred at T20, cancelled at +21.6 s; hold started at 19.3 s and released at 20.7 s:
   sent at +20.72 s** (deferred-send rule, spec D21).
+
+#### Cap light and cancel sounds (2026-09-29, GS0002000003)
+
+- **Status light (`src/light.c`):** the activation flow (blue pulse, green confirm)
+  and every assistance state light LED1 **and the charge LED (LED3)**. LED3 is the
+  nPM1300's RGB on its three 5 mA LED sinks, borrowed in host mode while lit and
+  handed back on release. This board runs the sinks as error / charging / host
+  (read at boot: modes 0/1/2), so the charge LED normally shows green while charging
+  and red on a charger error. Init also recovers a charge LED that a reset caught
+  borrowed. LED2 is wired to the nRF5340 and is not driven.
+- **More control-channel hooks:** `LED <red|green|blue|magenta|cyan|yellow|white|off>`
+  holds a colour on LED1 + LED3 (pauses the bench purple blink) so it can be judged
+  through the cap; `CANCELSTYLE <0-4>` switches the hold-to-cancel sound at runtime
+  (0 steady v0.5, 1 glide, 2 steps, 3 chime, 4 fade; default
+  `CONFIG_GOSTEADY_ASSIST_CANCEL_STYLE=1`).
+- **Measured:** all five sounds end-to-end (hold feedback 0.6 s into the hold, cancel
+  at 3.00–3.01 s, end cue, rail off); regression: 2 s hold released → sent +20.007 s,
+  confirmed +22.007 s; hold from 19.0 s → deferred at T20 → cancelled +22.03 s. Hold
+  polling runs at 20 ms while the sound plays (smooth glide steps).
